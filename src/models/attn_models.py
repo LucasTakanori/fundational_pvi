@@ -58,19 +58,26 @@ class PviCNNTransformer(BasePviLearner):
 
         self._make_layers()
 
+    def _build_pe(self) -> nn.Module:
+        if self.pe_type == "rrpe":
+            return RRPE(input_size=self.projection_dim, hidden_size=self.rrpe_dim, recurrent_type="LSTM")
+        elif self.pe_type == "sinusoidal":
+            return SinusoidalPositionalEncoder(d_model=self.projection_dim, max_len=5000)
+        elif self.pe_type == "learnable":
+            return LearnablePositionalEncoder(d_model=self.projection_dim, max_len=5000)
+        elif self.pe_type == "none":
+            return nn.Identity()
+        else:
+            raise ValueError(f"Unknown pe_type: {self.pe_type}")
+
     def _make_layers(self) -> None:
-        self.conv_layers = nn.ModuleList()
+        conv_layers = nn.ModuleList()
 
         if self.input_ndims == 2:
             for i in range(0, self.cnn_depth):
-                self.conv_layers.append(
+                conv_layers.append(
                     nn.Sequential(
-                        nn.Conv1d(
-                            self.num_channels,
-                            self.num_channels,
-                            kernel_size=5,
-                            padding=2,
-                        ),
+                        nn.Conv1d(self.num_channels, self.num_channels, kernel_size=5, padding=2),
                         nn.BatchNorm1d(self.num_channels),
                         nn.ReLU(),
                     )
@@ -80,19 +87,12 @@ class PviCNNTransformer(BasePviLearner):
 
         elif self.input_ndims == 4:
             for i in range(0, self.cnn_depth):
-                self.conv_layers.append(
+                conv_layers.append(
                     nn.Sequential(
-                        nn.Conv3d(
-                            self.num_channels,
-                            self.num_channels,
-                            kernel_size=(3, 3, 5),
-                            padding=(1, 1, 2),
-                        ),
+                        nn.Conv3d(self.num_channels, self.num_channels, kernel_size=(3, 3, 5), padding=(1, 1, 2)),
                         nn.BatchNorm3d(self.num_channels),
                         nn.ReLU(),
-                        nn.MaxPool3d(
-                            kernel_size=(2, 2, 1)
-                        ),  # Time dimension is not pooled
+                        nn.MaxPool3d(kernel_size=(2, 2, 1)),  # Time dimension is not pooled
                     )
                 )
 
@@ -105,42 +105,24 @@ class PviCNNTransformer(BasePviLearner):
             # error case, should be already handled in the base class
             channel_size = None
 
-        self.projection = nn.Linear(channel_size, self.projection_dim)
-
-        if self.pe_type == "rrpe":
-            self.rrpe = RRPE(
-                input_size=self.projection_dim,
-                hidden_size=self.rrpe_dim,
-                recurrent_type="LSTM",
-            )
-        elif self.pe_type == "sinusoidal":
-            self.rrpe = SinusoidalPositionalEncoder(
-                d_model=self.projection_dim, max_len=5000
-            )
-        elif self.pe_type == "learnable":
-            self.rrpe = LearnablePositionalEncoder(
-                d_model=self.projection_dim, max_len=5000
-            )
-        elif self.pe_type == "none":
-            self.rrpe = nn.Identity()
-        else:
-            raise ValueError(f"Unknown pe_type: {self.pe_type}")
-
-        # num_heads must be divisible by d_model and should be even
-        # so we find the maximum even divisor of the projection dimension
+        # num_heads must divide d_model and be even
         p = self.projection_dim
         nheads = max([n for n in range(1, 10) if (not p % n) and (not n % 2)])
 
-        self.transformer = Transformer(
-            d_model=self.projection_dim, num_layers=2, num_heads=nheads, dim_mlp=512
-        )
+        # Core = conv body + projection + positional encoder + transformer.
+        self.core = nn.ModuleDict({
+            "conv_layers": conv_layers,
+            "projection": nn.Linear(channel_size, self.projection_dim),
+            "pe": self._build_pe(),
+            "sequence_model": Transformer(d_model=self.projection_dim, num_layers=2, num_heads=nheads, dim_mlp=512),
+        })
 
-        flatten_size = (self.projection_dim * self.sequence_length) + self.stats_size
+        self.feature_size = self.projection_dim * self.sequence_length
+        flatten_size = self.feature_size + self.stats_size
 
         layers = []
         current_dim = flatten_size
 
-        # If mlp_depth > 1, add hidden layers
         if self.mlp_depth >= 2:
             layers.append(nn.Linear(current_dim, 256))
             layers.append(nn.ReLU())
@@ -153,17 +135,17 @@ class PviCNNTransformer(BasePviLearner):
             layers.append(nn.Dropout(0.1))
             current_dim = 256
 
-        # Output layer
         layers.append(nn.Linear(current_dim, self.output_size))
 
-        self.mlp = nn.Sequential(*layers)
+        # Readout = the MLP head (stats injected pre-readout).
+        self.readout = nn.Sequential(*layers)
 
-    def forward(
+    def forward_core(
         self, input_sequences: dict[str, torch.Tensor], input_stats: torch.Tensor
     ) -> torch.Tensor:
         s = self._process_sequence(input_sequences)  # shape: (B, C, H, W, T)
 
-        for conv in self.conv_layers:
+        for conv in self.core["conv_layers"]:
             s = conv(s)  # shape: (B, C', H', W', T)
 
         if self.input_ndims == 4:
@@ -171,20 +153,20 @@ class PviCNNTransformer(BasePviLearner):
 
         s = s.transpose(-2, -1)  # Shape: (B, T, C'*H'*W')
 
-        s = self.projection(s)  # Shape: (B, T, P)
-        s = self.rrpe(s)  # Shape: (B, T, P)
-        s = self.transformer(s)  # Shape: (B, T, P)
+        s = self.core["projection"](s)  # Shape: (B, T, P)
+        s = self.core["pe"](s)  # Shape: (B, T, P)
+        s = self.core["sequence_model"](s)  # Shape: (B, T, P)
 
         s = s.transpose(-2, -1)  # Shape: (B, P, T)
         s = s.flatten(start_dim=1)  # Shape: (B, P*T)
+        return s
 
+    def forward_readout(
+        self, features: torch.Tensor, input_stats: torch.Tensor
+    ) -> torch.Tensor:
         if input_stats.numel():  # if not empty
-            f = input_stats.flatten(start_dim=1)
-            s = torch.hstack([s, f])
-
-        y = self.mlp(s)
-
-        return y
+            features = torch.hstack([features, input_stats.flatten(start_dim=1)])
+        return self.readout(features)
 
 
 if __name__ == "__main__":

@@ -24,13 +24,13 @@ class PviCNN(BasePviLearner):
         tdim_kernel = [(7 - 2*i) for i in range(self.num_conv_layers)]
         tdim_padding = [(i-1)//2 for i in tdim_kernel]
 
-        self.conv_layers = nn.ModuleList()
+        conv_layers = nn.ModuleList()
 
         if self.input_ndims == 2: #1D
             channel_size = self.num_channels
 
             for i in range(self.num_conv_layers):
-                self.conv_layers.append(
+                conv_layers.append(
                     nn.Sequential(
                     nn.Conv1d(self.num_channels*in_multipliers[i],
                               self.num_channels*out_multipliers[i],
@@ -46,7 +46,7 @@ class PviCNN(BasePviLearner):
             channel_size = self.num_channels * (final_img_size**2)
 
             for i in range(self.num_conv_layers):
-                self.conv_layers.append(
+                conv_layers.append(
                     nn.Sequential(
                     nn.Conv3d(self.num_channels*in_multipliers[i],
                               self.num_channels*out_multipliers[i],
@@ -61,43 +61,34 @@ class PviCNN(BasePviLearner):
             channel_size = None
             pass
 
-        flatten_size = channel_size * out_multipliers[-1] * self.sequence_length
-        flatten_size += self.stats_size
+        # Core = the convolutional body (shared backbone).
+        self.core = conv_layers
+        self.feature_size = channel_size * out_multipliers[-1] * self.sequence_length
 
-        self.fc1 = nn.Sequential(
-            nn.Linear(flatten_size, 512),
-            nn.ReLU(),
-            nn.Dropout(0.3)
-            )
+        flatten_size = self.feature_size + self.stats_size
 
-        self.fc2 = nn.Sequential(
-            nn.Linear(512, 256),
-            nn.ReLU(),
-            nn.Dropout(0.3)
-            )
+        # Readout = the fully-connected head (stats injected pre-readout).
+        self.readout = nn.Sequential(
+            nn.Sequential(nn.Linear(flatten_size, 512), nn.ReLU(), nn.Dropout(0.3)),
+            nn.Sequential(nn.Linear(512, 256), nn.ReLU(), nn.Dropout(0.3)),
+            nn.Linear(256, self.output_size),
+        )
 
-        self.fc_out = nn.Linear(256, self.output_size)
-
-    def forward(self,
-                input_sequences: dict[str, torch.Tensor],
-                input_stats: torch.Tensor) -> torch.Tensor:
+    def forward_core(self,
+                     input_sequences: dict[str, torch.Tensor],
+                     input_stats: torch.Tensor) -> torch.Tensor:
         s = self._process_sequence(input_sequences)
-
-        for conv in self.conv_layers:
+        for conv in self.core:
             s = conv(s)
-
         s = s.flatten(start_dim=1)  # Flatten all dimensions except batch dimension
+        return s
 
+    def forward_readout(self,
+                        features: torch.Tensor,
+                        input_stats: torch.Tensor) -> torch.Tensor:
         if input_stats.numel():
-            f = input_stats.flatten(start_dim=1)
-            s = torch.hstack([s,f])
-
-        # Apply fully connected layers
-        s = self.fc1(s)
-        s = self.fc2(s)
-        outputs = self.fc_out(s)
-
-        return outputs # Output shape: (batch_size, output_size)
+            features = torch.hstack([features, input_stats.flatten(start_dim=1)])
+        return self.readout(features)  # Output shape: (batch_size, output_size)
 
 if __name__ == "__main__":
     pass

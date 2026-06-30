@@ -4,6 +4,7 @@ from src.packages import *
 
 from src.models.base_model import BasePviLearner
 
+
 class PviLinearRegression(BasePviLearner):
     def __init__(self,
                  data_shapes: dict[str,tuple[int,...]],
@@ -23,24 +24,26 @@ class PviLinearRegression(BasePviLearner):
         else:
             flatten_size = 0
 
-        flatten_size += self.stats_size
+        # forward_core emits the flattened input (without stats); stats are
+        # injected pre-readout, so the readout Linear consumes flatten + stats.
+        self.feature_size = flatten_size
+        self.core = nn.Identity()
+        self.readout = nn.Linear(flatten_size + self.stats_size, self.output_size)
 
-        self.fc = nn.Linear(flatten_size, self.output_size)
+    def forward_core(self,
+                     input_sequences: dict[str, torch.Tensor],
+                     input_stats: torch.Tensor) -> torch.Tensor:
+        s = self._process_sequence(input_sequences)
+        s = s.flatten(start_dim=1)
+        return self.core(s)
 
-    def forward(self,
-                input_sequences: dict[str, torch.Tensor],
-                input_stats: torch.Tensor
-                ) -> torch.Tensor:
-        s = self._process_sequence(input_sequences) # shape: (B, C, H, W, T)
-        s = s.flatten(start_dim=1)  # Flatten all dimensions except batch dimension
-
+    def forward_readout(self,
+                        features: torch.Tensor,
+                        input_stats: torch.Tensor) -> torch.Tensor:
         if input_stats.numel():
-            f = input_stats.flatten(start_dim=1)
-            s = torch.hstack([s,f])
+            features = torch.hstack([features, input_stats.flatten(start_dim=1)])
+        return self.readout(features)
 
-        outputs = self.fc(s)
-
-        return outputs
 
 class PviMLP(BasePviLearner):
     def __init__(self,
@@ -67,41 +70,30 @@ class PviMLP(BasePviLearner):
 
         flatten_size += self.stats_size
 
-        self.fc_in = nn.Sequential(
-                nn.Linear(flatten_size, self.num_features),
-                nn.ReLU()
-                    )
+        # Core = input projection + hidden trunk (the shared representation);
+        # stats are concatenated before the trunk (as in the original model).
+        trunk = [nn.Sequential(nn.Linear(flatten_size, self.num_features), nn.ReLU())]
+        for _ in range(self.num_hidden_layers):
+            trunk.append(nn.Sequential(nn.Linear(self.num_features, self.num_features), nn.ReLU()))
+        self.core = nn.Sequential(*trunk)
 
-        self.fc_layers = nn.ModuleList()
-        for i in range(self.num_hidden_layers):
-            self.fc_layers.append(
-                    nn.Sequential(
-                            nn.Linear(self.num_features, self.num_features),
-                            nn.ReLU()
-                    ))
+        self.feature_size = self.num_features
+        self.readout = nn.Linear(self.num_features, self.output_size)
 
-        self.fc_out = nn.Linear(self.num_features, self.output_size)
-
-    def forward(self,
-                input_sequences: dict[str, torch.Tensor],
-                input_stats: torch.Tensor
-                ) -> torch.Tensor:
-        s = self._process_sequence(input_sequences)  # shape: (B, C, H, W, T)
-        s = s.flatten(start_dim=1)  # Flatten all dimensions except batch dimension
-
-
+    def forward_core(self,
+                     input_sequences: dict[str, torch.Tensor],
+                     input_stats: torch.Tensor) -> torch.Tensor:
+        s = self._process_sequence(input_sequences)
+        s = s.flatten(start_dim=1)
         if input_stats.numel():
-            f = input_stats.flatten(start_dim=1)
-            s = torch.hstack([s, f])
+            s = torch.hstack([s, input_stats.flatten(start_dim=1)])
+        return self.core(s)
 
-        s = self.fc_in(s)
+    def forward_readout(self,
+                        features: torch.Tensor,
+                        input_stats: torch.Tensor) -> torch.Tensor:
+        return self.readout(features)
 
-        for fc_layer in self.fc_layers:
-            s = fc_layer(s)
-
-        outputs = self.fc_out(s)
-
-        return outputs
 
 if __name__ == "__main__":
     pass

@@ -1,19 +1,18 @@
 """`PviFoundationModel` - a shared core + per-subject readout heads.
 
-This subclasses `BasePviLearner`, so it inherits `process_batch` and plugs
-straight into the existing training stack (`src/models/trainer_v3.py`,
-`workflow_v3.py`): the trainer calls `process_batch(batch)` then
-`model(input_sequences, input_stats)`. To stay compatible with that 2-argument
-forward, the model keeps a single *active* readout that `forward` routes
-through. Set it with `set_active(...)`:
+This subclasses `BasePviLearner` and implements the `forward_core` /
+`forward_readout` contract: `forward_core` is the shared encoder, and
+`forward_readout` routes through the currently *active* per-subject readout.
+`forward` (inherited) composes the two, so the model plugs straight into the
+existing training stack (`trainer_v3.py` / `workflow_v3.py`).
 
     * Pretraining (pooled population): keep the SHARED_READOUT active.
-    * Transfer (new subject): `freeze_core()`, `add_readout(subject)`,
+    * Transfer (new subject): `freeze_core()` (inherited), `add_readout(subject)`,
       `set_active(subject)`, then train only the readout.
 
 The dataset samples do not carry a subject id, so per-sample routing within a
-mixed batch is intentionally *not* attempted here; the paper's core+readout
-transfer protocol (one active readout per training run) is what this models.
+mixed batch is intentionally not attempted; the paper's core+readout transfer
+protocol (one active readout per training run) is what this models.
 """
 
 from src.packages import *  # noqa: F401,F403  (torch, nn, ...)
@@ -47,7 +46,8 @@ class PviFoundationModel(BasePviLearner):
         self._make_layers()
 
         # One shared readout (used for pooled pretraining) plus any requested
-        # per-subject readouts.
+        # per-subject readouts. `self.readout` (the BasePviLearner primary head)
+        # is kept pointing at the active readout for API compatibility.
         self.readouts = nn.ModuleDict()
         self.add_readout(SHARED_READOUT)
         for sid in (subjects or []):
@@ -68,6 +68,7 @@ class PviFoundationModel(BasePviLearner):
         self.core = PviCore(self._flatten_size(),
                             num_features=self.num_features,
                             num_hidden_layers=self.num_hidden_layers)
+        self.feature_size = self.num_features
 
     def _flatten_input(self,
                        input_sequences: dict[str, torch.Tensor],
@@ -93,6 +94,7 @@ class PviFoundationModel(BasePviLearner):
             raise KeyError(f"No readout '{name}'. Call add_readout('{name}') first. "
                            f"Available: {list(self.readouts)}")
         self._active = name
+        self.readout = self.readouts[name]   # keep BasePviLearner.readout in sync
         return self
 
     @property
@@ -103,28 +105,19 @@ class PviFoundationModel(BasePviLearner):
     def subjects(self) -> list[str]:
         return [k for k in self.readouts if k != SHARED_READOUT]
 
-    # --------------------------------------------------------------- freezing
-    def freeze_core(self) -> "PviFoundationModel":
-        for p in self.core.parameters():
-            p.requires_grad_(False)
-        return self
-
-    def unfreeze_core(self) -> "PviFoundationModel":
-        for p in self.core.parameters():
-            p.requires_grad_(True)
-        return self
-
-    # ---------------------------------------------------------------- forward
-    def encode(self,
-               input_sequences: dict[str, torch.Tensor],
-               input_stats: torch.Tensor) -> torch.Tensor:
+    # ---------------------------------------------------------- core/readout
+    def forward_core(self,
+                     input_sequences: dict[str, torch.Tensor],
+                     input_stats: torch.Tensor) -> torch.Tensor:
         """Shared-core features (subject-agnostic)."""
         return self.core(self._flatten_input(input_sequences, input_stats))
 
-    def forward(self,
-                input_sequences: dict[str, torch.Tensor],
-                input_stats: torch.Tensor) -> torch.Tensor:
-        features = self.encode(input_sequences, input_stats)
+    # convenience alias
+    encode = forward_core
+
+    def forward_readout(self,
+                        features: torch.Tensor,
+                        input_stats: torch.Tensor) -> torch.Tensor:
         return self.readouts[self._active](features)
 
     def forward_for(self,
@@ -136,14 +129,4 @@ class PviFoundationModel(BasePviLearner):
         try:
             return self.set_active(subject).forward(input_sequences, input_stats)
         finally:
-            self._active = prev
-
-    # ------------------------------------------------------- core persistence
-    def core_state_dict(self) -> dict:
-        return self.core.state_dict()
-
-    def load_core_state_dict(self, state: dict, freeze: bool = True) -> "PviFoundationModel":
-        self.core.load_state_dict(state)
-        if freeze:
-            self.freeze_core()
-        return self
+            self.set_active(prev)
