@@ -73,6 +73,16 @@ export PVIPROJECT_ROOT=/path/to/PviProject
 Training artifacts (checkpoints, results, the saved core) are written under
 `$PVIPROJECT_ROOT/artifacts/<logdir>/main/` and are git-ignored.
 
+## Data-efficiency & analysis
+
+- `BasePviLearner` exposes a core/readout split (`forward_core`/`forward_readout`),
+  `freeze_core()`, and transfer helpers (`transfer_core`, `load_core_from_state_dict`)
+  plus auxiliary heads (`add_aux_head`) — the basis for foundation pretrain → readout transfer.
+- `PviConfiguredDataset.set_train_budget(n_seq=… | minutes=…, seed=…)` restricts the
+  training set to a data budget (test set untouched) for the Exp A/B data-efficiency curves.
+- `src/analysis/budget_curves.py` aggregates per-run metrics (`cc_abs` via `bp_accuracy`,
+  `amae`/`armse` via `metrics_waveform`) into mean±sem foundation-vs-individual curves and plots them.
+
 ## Notes
 
 - The foundation model is a **scaffold**: the core/readout architecture, the

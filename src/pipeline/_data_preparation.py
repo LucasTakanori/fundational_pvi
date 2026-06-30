@@ -14,6 +14,39 @@ from src.utils import miscellaneous as misc
 from src.utils import h5io as h5io
 from src.pipeline.data_extraction import PviRawDataset
 
+
+def subsample_budget(masks: list[tuple[int, ...]],
+                     n_seq: int = None,
+                     minutes: float = None,
+                     seconds_per_sequence: float = None,
+                     seed: int = 0) -> list[tuple[int, ...]]:
+    """Reproducibly pick a training-budget subset of `masks`.
+
+    Provide exactly one of:
+      * `n_seq`   - number of sequences to keep, or
+      * `minutes` - wall-clock budget; converted to a count via
+                    `seconds_per_sequence` (required when `minutes` is given).
+    The original ordering is preserved in the returned subset (only the count
+    is reduced); selection is seeded so budget curves are reproducible.
+    """
+    if (n_seq is None) == (minutes is None):
+        raise ValueError("Provide exactly one of `n_seq` or `minutes`.")
+
+    total = len(masks)
+    if minutes is not None:
+        if not seconds_per_sequence or seconds_per_sequence <= 0:
+            raise ValueError("A `minutes` budget requires a positive `seconds_per_sequence`.")
+        n_seq = int(math.ceil(minutes * 60.0 / seconds_per_sequence))
+
+    n_seq = max(0, min(int(n_seq), total))
+
+    rng = random.Random(seed)
+    indices = list(range(total))
+    rng.shuffle(indices)
+    keep = sorted(indices[:n_seq])
+    return [masks[i] for i in keep]
+
+
 class PviConfiguredDataset(Dataset, ABC):
     """
     A class to transform the raw h5 data to torch-compatible format
@@ -263,6 +296,44 @@ class PviConfiguredDataset(Dataset, ABC):
                   **kwargs}
 
         self._loader_params = params
+
+    def set_train_budget(self,
+                         n_seq: int = None,
+                         minutes: float = None,
+                         seconds_per_sequence: float = None,
+                         seed: int = 0) -> 'PviConfiguredDataset':
+        """Restrict training to a data budget (for data-efficiency curves).
+
+        Subsamples the *training* sequences (test set untouched) down to `n_seq`
+        sequences or a `minutes` budget, then rebuilds the train/test subsets.
+        Always samples from the full training partition, so repeated calls with
+        different budgets are independent. Use `reset_train_budget()` to restore.
+        """
+        if getattr(self, '_full_train_mask', None) is None:
+            self._full_train_mask = list(self.train_mask)
+
+        self.train_mask = subsample_budget(self._full_train_mask,
+                                            n_seq=n_seq,
+                                            minutes=minutes,
+                                            seconds_per_sequence=seconds_per_sequence,
+                                            seed=seed)
+        self.subsets = self._get_subsets_from_split()
+
+        self._split_params = {**self._split_params,
+                              'budget': {'n_seq': len(self.train_mask),
+                                         'minutes': minutes,
+                                         'seconds_per_sequence': seconds_per_sequence,
+                                         'seed': seed,
+                                         'available': len(self._full_train_mask)}}
+        return self
+
+    def reset_train_budget(self) -> 'PviConfiguredDataset':
+        """Restore the full training partition after `set_train_budget`."""
+        if getattr(self, '_full_train_mask', None) is not None:
+            self.train_mask = list(self._full_train_mask)
+            self.subsets = self._get_subsets_from_split()
+            self._split_params.pop('budget', None)
+        return self
 
     def get_dataloaders(self) -> dict[str,DataLoader]:
 
