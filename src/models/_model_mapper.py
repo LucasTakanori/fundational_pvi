@@ -6,6 +6,7 @@ from src.models.attn_models import PviCNNTransformer
 from src.models.cnn_models import PviCNN
 from src.models.mlp_models import PviLinearRegression, PviMLP
 from src.models.s4_models import PviSamba
+from src.models.densenet_convlstm import PviDenseNetConvLSTM
 
 
 def ml_session_mapper(identifier: str):
@@ -13,7 +14,8 @@ def ml_session_mapper(identifier: str):
                     'mlp': PviMLP,
                     'cnn': PviCNN,
                     'crt': PviCNNTransformer,
-                    'samba': PviSamba}
+                    'samba': PviSamba,
+                    'dnclstm': PviDenseNetConvLSTM}
 
     keywords = identifier.split(sep='-')
 
@@ -30,11 +32,13 @@ def get_samba_kwargs(config_path: Path) -> dict:
 
     modules = config['model']['modules']
 
-    # cnn_depth: count top-level conv_layers.N entries (exactly one dot after conv_layers)
-    cnn_depth = sum(1 for k in modules if k.startswith('conv_layers.') and k.count('.') == 1)
+    # Module names are namespaced under the core/readout split:
+    #   conv body -> core.conv_layers.N, positional encoder -> core.pe, head -> readout.*
+    # cnn_depth: count top-level core.conv_layers.N entries (exactly two dots)
+    cnn_depth = sum(1 for k in modules if k.startswith('core.conv_layers.') and k.count('.') == 2)
 
-    # pe_type: infer from the rrpe module string
-    rrpe_str = modules.get('rrpe', '')
+    # pe_type: infer from the core.pe module string
+    rrpe_str = modules.get('core.pe', '')
     if 'LearnablePositional' in rrpe_str:
         pe_type = 'learnable'
     elif 'Sinusoidal' in rrpe_str:
@@ -44,9 +48,9 @@ def get_samba_kwargs(config_path: Path) -> dict:
     else:
         pe_type = 'rrpe'
 
-    # mlp_depth: count Linear layers under mlp.*
+    # mlp_depth: count Linear layers under the readout head (readout.*)
     mlp_linears = sum(1 for k, v in modules.items()
-                      if k.startswith('mlp.') and isinstance(v, str) and v.startswith('Linear'))
+                      if k.startswith('readout.') and isinstance(v, str) and v.startswith('Linear'))
     if mlp_linears <= 1:
         mlp_depth = 1
     elif mlp_linears == 2:
