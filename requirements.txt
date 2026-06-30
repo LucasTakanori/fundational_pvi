@@ -11,11 +11,11 @@ h5py
 PyYAML
 POT          # imported as `ot`
 tqdm
+matplotlib   # analysis plots (src/analysis/budget_curves.py); import is guarded
 
 # --- Dev / test ---
 pytest
 
 # --- Optional ---
-# matplotlib   # plotting in analysis/ and src/scripts/extract_ensembles.py
 # geomloss     # only src/models/quality_evaluator.py (import is guarded)
 # mambapy      # only src/models/s4_models.py (Mamba/S4, WIP; import is guarded)
