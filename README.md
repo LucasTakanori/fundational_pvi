@@ -92,6 +92,15 @@ Training artifacts (checkpoints, results, the saved core) are written under
   reconstruction in `src/models/eit_recon.py`.
 - `src/foundation/evaluation.py` (`evaluate`/`evaluate_ood`) + `experiments.py`
   (`run_budget_curve`) drive the Exp A/B/C/G matrix into records for `budget_curves`.
+- `src/analysis/interpretability.py` (Exp D/E): in-silico input perturbation, gradient
+  saliency, latent extraction (for UMAP), and the readout functional-barcode probe.
+
+### Architectures (all under the core/readout contract, selectable via `_model_mapper`)
+
+`linear`, `mlp`, `cnn` (PviCNN), `crt` (PviCNNTransformer), `samba` (PviSamba, WIP),
+`mae` (PviMaskedTransformer — tokenized MAE-style encoder, candidate 2), and
+`dnclstm` (PviDenseNetConvLSTM — paper-faithful 3D-DenseNet + Conv-LSTM + spatial
+bilinear readout, candidate 4).
 
 ## Notes
 
