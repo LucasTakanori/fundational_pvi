@@ -1,0 +1,493 @@
+function plot_results(tbl_results, tl, fg)
+    arguments
+        tbl_results
+        tl string
+        fg (1,1) matlab.ui.Figure = gcf
+    end
+
+    if istable(tbl_results)
+        data = table2array(tbl_results);
+    else
+        data = tbl_results;
+    end
+
+    num_cols = size(data,2);
+    predictions = data(:,1:num_cols/2);
+    targets = data(:,(num_cols/2 + 1):end);
+
+    clf(fg);
+    
+    layout = tiledlayout(fg, 3, 4);
+    locs = [1 2 3 4 5 6 7 8 9 11];
+    rows = ones(1, 10);
+    cols = [1 1 1 1 1 1 1 1 2 2];
+    rc = [rows(:), cols(:)];
+    for k = 1:numel(locs)
+        ax(k) = nexttile(layout, locs(k), rc(k,:));
+    end
+
+    layout.Padding = "tight";
+    layout.TileSpacing = "tight";
+
+    layout.Title.String = tl;
+    layout.Title.FontWeight = 'bold';
+
+    plot_correlation(sbp(predictions), sbp(targets), "SBP", ax(1));
+    plot_bland_altman(sbp(predictions), sbp(targets), ax(2));
+    plot_histogram_error(sbp(predictions), sbp(targets), ax(3));
+    plot_histogram_compare(sbp(predictions), sbp(targets), "SBP", ax(4));
+
+    plot_correlation(dbp(predictions), dbp(targets), "DBP", ax(5));
+    plot_bland_altman(dbp(predictions), dbp(targets), ax(6));
+    plot_histogram_error(dbp(predictions), dbp(targets), ax(7));
+    plot_histogram_compare(dbp(predictions), dbp(targets), "DBP", ax(8));
+
+    ax(9) = nexttile(layout, locs(9), rc(9,:));
+    plot_ensemble(data, "predictions", ax(9));
+    
+    ax(10) = nexttile(layout, locs(10), rc(10,:));
+    plot_ensemble(data, "targets", ax(10));
+
+    for k = 1:numel(ax)
+        ax(k).Box = "off";
+        ax(k).TickDir = "out";
+    end
+
+    for k = 1:8
+        ax(k).PlotBoxAspectRatio = [1, 1, 1];
+    end
+end
+
+%% Supporting functions
+function plot_correlation(predictions, targets, bptag, ax)
+    arguments
+        predictions {mustBeNumeric}
+        targets {mustBeNumeric}
+        bptag (1,1) string = "BP";
+        ax (1,1) matlab.graphics.axis.Axes = gca;
+    end
+
+    if nargin < 4 || isempty(ax)
+        ax = gca;
+    end
+
+    ax.Tag = "correlation";
+    ax.XLabel.String = sprintf("True %s (mm Hg)", bptag);
+    ax.YLabel.String = sprintf("Predicted %s (mm Hg)", bptag);
+
+    cla(ax);
+    hold(ax,"on");
+
+    % Convert to column vectors
+    predictions = predictions(:);
+    targets = targets(:);
+
+    % Calculate Pearson correlation coefficient and p-value
+    [r, pv] = corr(predictions, targets, 'Type', 'Pearson');
+    
+    % Perform linear regression (polyfit equivalent)
+    coeffs = polyfit(targets, predictions, 1);
+    
+    % Calculate limits for plot
+    dLow = floor(min([predictions(:); targets(:)]));
+    dHigh = ceil(max([predictions(:); targets(:)]));
+
+    dPad = 0.075; % padding
+    
+    dLow = floor(dLow - dPad * (dHigh - dLow));
+    dHigh = ceil(dHigh + dPad * (dHigh - dLow));
+    
+    dMid = round(mean([dLow, dHigh]), 2);
+    
+    % Scatter plot
+    sct = scatter(ax, targets, predictions);
+    sct.Marker = "o";
+    sct.SizeData = 12;
+    sct.MarkerFaceColor = "blue";
+    sct.MarkerFaceAlpha = 0.15;
+    sct.MarkerEdgeColor = "None";
+    hold on;
+    
+    % Plot regression line
+    plot(ax, targets, polyval(coeffs, targets), '-', 'Color', 'black');
+    
+    % Annotate correlation and p-value
+    if pv < 0.0005
+        pv_string = "p < 0.0005";
+    elseif pv < 0.005
+        pv_string = "p < 0.005";
+    elseif pv < 0.05
+        pv_string = "p < 0.05";
+    else
+        pv_string = sprintf("%.4f", pv);
+    end
+
+    r2_string = sprintf("r^2 = %.4f", r^2);
+    
+    str = join([r2_string,pv_string],"\n");
+    txt = text(ax, 0.05, 0.95, sprintf(str), ...
+         'HorizontalAlignment', 'left',...
+         'VerticalAlignment', 'top',...
+         'Units','normalized', ...
+         'Interpreter','tex');
+    
+    % Set axis limits and ticks
+    ax.XLim = [dLow, dHigh];
+    ax.XTick = [dLow, dMid, dHigh];
+    ax.YLim = ax.XLim;
+    ax.YTick = ax.XTick;
+end
+
+function plot_bland_altman(predictions, targets, ax)
+    arguments
+        predictions {mustBeNumeric}
+        targets {mustBeNumeric}
+        ax (1,1) matlab.graphics.axis.Axes = gca;
+    end
+
+    if nargin < 3 || isempty(ax)
+        ax = gca;
+    end
+
+    ax.Tag = "BA";
+    ax.XLabel.String = 'Means (mm Hg)';
+    ax.YLabel.String = 'Difference (mm Hg)';
+
+    cla(ax);
+    hold(ax,"on");
+    
+    % Convert inputs to column vectors
+    predictions = predictions(:);
+    targets = targets(:);
+    
+    % Mean and difference between prediction and test
+    mean12 = mean([predictions, targets], 2);
+    diff12 = predictions - targets;   % Difference
+    md = mean(diff12);            % Mean of the difference
+    sd = std(diff12);             % Standard deviation of the difference
+    CI_low = md - 1.96 * sd;      % Confidence intervals
+    CI_high = md + 1.96 * sd;
+    
+    % Calculate x-axis limits
+    xLow = min(mean12);
+    xHigh = max(mean12);
+    xPad = 0.15;
+    
+    xLow = floor(xLow - xPad * (xHigh - xLow));
+    xHigh = ceil(xHigh + xPad * (xHigh - xLow));
+    
+    xMid = round(mean([xLow, xHigh]), 2);
+    
+    % Calculate y-axis limits
+    yLow = floor(md - 5 * sd);
+    yHigh = ceil(md + 5 * sd);
+    
+    % Scatter plot of means vs differences
+    sct = scatter(ax, mean12, diff12);
+    sct.Marker = "o";
+    sct.SizeData = 12;
+    sct.MarkerFaceColor = "blue";
+    sct.MarkerFaceAlpha = 0.1;
+    sct.MarkerEdgeColor = "None";
+    hold on;
+    
+    % Plot horizontal lines for mean difference and confidence intervals
+    yline(ax, md, '-', 'Color', 'black');         % Mean difference line
+    yline(ax, CI_high, '--', 'Color', 0.5*[1 1 1]);    % Upper CI line
+    yline(ax, CI_low, '--', 'Color', 0.5*[1 1 1]);     % Lower CI line
+    
+    % Annotate the plot
+    text(ax, xHigh, md + 0.05 * sd, 'MEAN DIFF:', 'VerticalAlignment', 'bottom', 'HorizontalAlignment', 'right');
+    text(ax, xHigh, md - 0.05 * sd, num2str(round(md, 2)), 'VerticalAlignment', 'top', 'HorizontalAlignment', 'right');
+    text(ax, xHigh, CI_low + 0.05 * sd, '-1.96 SD:', 'VerticalAlignment', 'bottom', 'HorizontalAlignment', 'right');
+    text(ax, xHigh, CI_low - 0.05 * sd, num2str(round(CI_low, 2)), 'VerticalAlignment', 'top', 'HorizontalAlignment', 'right');
+    text(ax, xHigh, CI_high + 0.05 * sd, '+1.96 SD:', 'VerticalAlignment', 'bottom', 'HorizontalAlignment', 'right');
+    text(ax, xHigh, CI_high - 0.05 * sd, num2str(round(CI_high, 2)), 'VerticalAlignment', 'top', 'HorizontalAlignment', 'right');
+    
+    % Set axis limits and ticks
+    ax.XLim = [xLow, xHigh];
+    ax.XTick = [xLow, xMid, xHigh];
+    ax.YLim = [yLow, yHigh];
+    % ax.YTick = [yLow, 0, yHigh];
+end
+
+function plot_histogram_error(predictions, targets, ax)
+    arguments
+        predictions {mustBeNumeric}
+        targets {mustBeNumeric}
+        ax (1,1) matlab.graphics.axis.Axes = gca;
+    end
+
+    if nargin < 3 || isempty(ax)
+        ax = gca;
+    end
+
+    ax.Tag = "histogram";
+    ax.XLabel.String = 'Absolute error (mm Hg)';
+    ax.YLabel.String = 'Occurrences';
+    
+    cla(ax);
+    hold(ax,"on");
+    
+    % Convert inputs to column vectors
+    predictions = predictions(:);
+    targets = targets(:);
+
+    % Calculate prediction error
+    err = predictions - targets;
+    err = abs(err);
+
+    % Create histogram with 50 bins
+    num_bins = 50;
+    h = histogram(ax, err, num_bins);
+
+    h.FaceColor = "blue";
+    h.FaceAlpha = 0.5;
+    h.EdgeColor = "None";
+    
+    % Calculate x and y axis limits
+    xL = floor(min(h.BinEdges));  % This would be 0 if we use absolute error
+    xH = ceil(max(h.BinEdges));
+    xH = xH + mod(xH, 2);  % Make even if odd
+    xM = mean([xL, xH]);
+    
+    yL = 0;
+    yH = max(h.BinCounts);
+    yH = yH + mod(yH, 2);  % Make even if odd
+    yM = mean([yL, yH]);
+
+    % Set axis limits and ticks
+    ax.XLim = [xL, xH];
+    ax.XTick = [xL, xM, xH];
+    ax.YLim = [yL, yH];
+    ax.YTick = [yL, yM, yH];
+    
+    bounds = [5, 10, 15];
+    func = @(e, b) sum(abs(e) < b)/numel(e);
+    
+    ratios = arrayfun(@(b) func(err,b) ,bounds);
+    
+    str1 = sprintf('MEAN: %.2f\nSTD: %.2f',...
+        mean(err), std(err));
+    str2 = arrayfun(@(b, r) sprintf('%d-tol: %.2f %%', b, r*100),...
+        bounds, ratios,...
+        'UniformOutput', false);
+    str = [{str1}, str2];
+
+    cs = cumsum(h.Values);
+    cs = [0 cs]/max(cs)*yH;
+    plt = plot(ax,h.BinEdges, cs)
+
+    txt = text(ax, 0.95, 0.95, str, ...
+        'HorizontalAlignment', 'right',...
+        'VerticalAlignment', 'top',...
+        'Units','normalized');
+end
+
+function plot_histogram_compare(predictions, targets, bptag, ax)
+    arguments
+        predictions {mustBeNumeric}
+        targets {mustBeNumeric}
+        bptag (1,1) string = "BP";
+        ax (1,1) matlab.graphics.axis.Axes = gca;
+    end
+
+    if nargin < 4 || isempty(ax)
+        ax = gca;
+    end
+
+    ax.Tag = "histogram";
+    ax.XLabel.String = sprintf("%s (mm Hg)", bptag);
+    ax.YLabel.String = 'Occurrences';
+
+    cla(ax);
+    hold(ax,"on");
+    
+    % Convert inputs to column vectors
+    predictions = predictions(:);
+    targets = targets(:);
+
+    % Create histogram with 50 bins
+    num_bins = 50;
+    h1 = histogram(ax, predictions, num_bins);
+    h1.DisplayName = "Predictions";
+    h1.FaceAlpha = 0.5;
+    h1.FaceColor = 'blue';
+    h1.EdgeColor = "None";
+
+    h2 = histogram(ax, targets, num_bins);
+    h2.DisplayName = "True values";
+    h2.FaceAlpha = 0.5;
+    h2.FaceColor = 'red';
+    h2.EdgeColor = "None";
+
+    N = sort([h1.BinCounts(:); h2.BinCounts(:)]);
+    E = sort([h1.BinEdges(:); h2.BinEdges(:)]);
+    
+    % Calculate x and y axis limits
+    xL = floor(min(E));
+    xH = ceil(max(E));
+    
+    xL = xL - mod(xL, 2);  % Make even if odd
+    xH = xH + mod(xH, 2);  
+    xM = mean([xL, xH]);
+    
+    yL = 0;
+    yH = max(N);
+    yH = yH + mod(yH, 2);  % Make even if odd
+    yM = mean([yL, yH]);
+
+    % Set axis limits and ticks
+    ax.XLim = [xL, xH];
+    ax.XTick = [xL, xM, xH];
+    ax.YLim = [yL, yH];
+    ax.YTick = [yL, yM, yH];
+
+    lgd = legend(ax);
+    lgd.Location = 'northeast';
+    lgd.Orientation = 'vertical';
+    lgd.Box = 'off';
+end
+
+function plot_fiducials(predictions, targets, ax)
+    arguments
+        predictions {mustBeNumeric}
+        targets {mustBeNumeric}
+        ax (1,1) matlab.graphics.axis.Axes = gca;
+    end
+
+    if nargin < 4 || isempty(ax)
+        ax = gca;
+    end
+
+    ax.Tag = "fiducials";
+    % ax.XLabel.String = sprintf("True %s (mm Hg)", bptag);
+    % ax.YLabel.String = sprintf("Predicted %s (mm Hg)", bptag);
+
+    cla(ax);
+    hold(ax,"on");
+
+    % Convert to column vectors
+    sbp_predictions = sbp(predictions);
+    dbp_predictions = dbp(predictions);
+
+    sbp_targets = sbp(targets);
+    dbp_targets = dbp(targets);
+
+    colors = colororder("gem12");
+    colors = [colors, 0.5*ones(size(colors,1),1)];
+
+    plts(1) = plot(sbp_predictions,...
+        'Color', colors(1,:),...
+        'DisplayName', 'Predicted SBP');
+    
+    plts(2) = plot(sbp_targets,...
+        'Color', colors(2,:),...
+        'DisplayName', 'True SBP');
+    
+    plts(3) = plot(dbp_predictions,...
+        'Color', colors(3,:),...
+        'DisplayName', 'Predicted DBP');
+    
+    plts(4) = plot(dbp_targets,...
+        'Color', colors(4,:),...
+        'DisplayName', 'True DBP');
+
+    ax.XLim = [0, size(predictions,1)];
+    ax.XTick = unique([(0:1000:ax.XLim(2)) ax.XLim(2)]);
+
+    lgd = legend(ax);
+    lgd.Location = 'north';
+    lgd.Orientation = 'horizontal';
+    lgd.Box = 'off';
+end
+
+function plot_ensemble(data, tag, ax)
+    arguments
+        data {mustBeNumeric}
+        tag (1,1) string
+        ax (1,1) matlab.graphics.axis.Axes = gca;
+    end
+    
+    if nargin < 3 || isempty(ax)
+        ax = gca;
+    end
+
+    ax.Tag = "ensemble";
+
+    num_cols = size(data,2);
+    predictions = data(:,1:num_cols/2);
+    targets = data(:,(num_cols/2 + 1):end);
+    
+    if strcmpi(tag, "predictions")
+        data = predictions;
+        label = "Predicted BP (mm Hg)";
+    elseif strcmpi(tag, "targets")
+        data = targets;
+        label = "True BP (mm Hg)";
+    else
+        error("something ain't right")
+    end
+    
+    ax.YLabel.String = label;
+
+    cla(ax);
+    hold(ax,"on");
+
+    tvec = 1:size(data,2);
+    sMEAN = mean(data, 1);
+    sDEV = std(data, [], 1);
+    kDEV = 1;
+
+    plts = plot(tvec, data, '-');
+
+    color = [.75*[1 1 1] .1]; % last value is alpha
+    arrayfun(@(plt) set(plt, "Color", color), plts);
+    arrayfun(@(plt) set(plt, "LineWidth", 0.1), plts);
+
+    plot(tvec, sMEAN, '-r', 'LineWidth', 1);
+    plot(tvec, sMEAN + kDEV*sDEV, '-k', 'LineWidth', 1);
+    plot(tvec, sMEAN - kDEV*sDEV, '-k', 'LineWidth', 1);
+
+    dLow = floor(min(data(:)));
+    dHigh = ceil(max(data(:)));
+
+    dPad = 0.075; % padding
+    
+    dLow = floor(dLow - dPad * (dHigh - dLow));
+    dHigh = ceil(dHigh + dPad * (dHigh - dLow));
+    dMid = round(mean([dLow, dHigh]), 2);
+
+    if strcmpi(tag, "predictions")
+        err = predictions - targets;
+
+        mae = sum(abs(err),2)/size(err,2);
+        rmse = sqrt(sum(err.^2,2)/size(err,2));
+
+        amae = sum(mae)/size(err,1);
+        armse = sum(rmse)/size(err,1);
+        str = sprintf('AMAE: %.2f\nARMSE: %.2f', amae, armse);
+        
+        txt = text(ax, 0.95, 0.95, str, ...
+            'HorizontalAlignment', 'right',...
+            'VerticalAlignment', 'top',...
+            'Units','normalized');
+
+    end
+
+    ax.YLim = [dLow, dHigh];
+    ax.YTick = [dLow, dMid, dHigh];
+    ax.XLim = [tvec(1) tvec(end)];
+    ax.XAxis.Visible = false;
+
+end
+
+%% support functions
+
+function bp_out = sbp(bp_in)
+    bp_out = max(bp_in, [], 2);
+end
+
+function bp_out = dbp(bp_in)
+    bp_out = min(bp_in, [], 2);
+end

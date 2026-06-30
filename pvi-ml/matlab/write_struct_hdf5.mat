@@ -1,0 +1,68 @@
+function write_struct_hdf5(struct_in, file_path, base_path)
+    arguments
+        struct_in (1,1) struct % % nested struct
+        file_path (1,1) string % actual path of the h5 data
+        base_path (1,1) string % current group, can be root
+    end
+
+    fnames = string(fieldnames(struct_in));
+    for i = 1:length(fnames)
+        fn = fnames(i);
+        data = struct_in.(fn);
+
+        ds_path = join([base_path, fn], "/");
+
+        % Check if the field is another struct and handle recursively
+        if isstruct(data)
+            % Recursively process the nested struct
+            if isempty(fieldnames(data))
+                continue;
+            end
+
+            if isscalar(data)
+                fprintf("\t %s...\n", ds_path);
+                write_struct_hdf5(data, file_path, ds_path);
+            else
+                for k = 1:numel(data)
+                    ds_path_k = ds_path + string(k);
+                    fprintf("\t %s...\n", ds_path_k);
+                    write_struct_hdf5(data(k), file_path, ds_path_k);
+                end
+            end
+        else
+            if isempty(data)
+                continue;
+            end
+
+            % Write the data to HDF5
+            fprintf("\t %s (%s : %s)\n", ds_path, class(data), join(string(size(data)),"x"));
+            if ischar(data) || isstring(data)
+                h5create(file_path, ds_path, size(data), "Datatype", "string");
+                h5write(file_path, ds_path, data);
+            
+            elseif isnumeric(data)
+                if ~issparse(data)
+                    h5create(file_path, ds_path, size(data), "Datatype", "double");
+                    h5write(file_path, ds_path, data);
+                
+                else % write sparse matrix
+                    [c, r, v] = find(data); % col/row/value
+
+                    % Store components
+                    h5create(file_path, ds_path + "/cols", length(c), 'Datatype', 'int64');
+                    h5create(file_path, ds_path + "/rows", length(r), 'Datatype', 'int64');
+                    h5create(file_path, ds_path + "/shape", [1 2], 'Datatype', 'int64');
+                    h5create(file_path, ds_path + "/values", length(v)); % default is double (float64)
+
+                    h5write(file_path, ds_path + "/cols", int64(c));
+                    h5write(file_path, ds_path + "/rows", int64(r));
+                    h5write(file_path, ds_path + "/shape", int64(size(data)));
+                    h5write(file_path, ds_path + "/values", v);
+                end
+            else
+                error("Unsupported datatype: %s. Must be char/string or numeric", type(data))
+            end
+
+        end
+    end
+end
