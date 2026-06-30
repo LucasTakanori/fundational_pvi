@@ -1,0 +1,21 @@
+# Core runtime dependencies for the PVI pipeline + foundation model.
+# Install with:  pip install -r requirements.txt
+# (CPU torch is fine for the smoke test; install a CUDA build for real training.)
+
+torch
+numpy
+scipy
+scikit-learn
+pandas
+h5py
+PyYAML
+POT          # imported as `ot`
+tqdm
+
+# --- Dev / test ---
+pytest
+
+# --- Optional ---
+# matplotlib   # plotting in analysis/ and src/scripts/extract_ensembles.py
+# geomloss     # only src/models/quality_evaluator.py (import is guarded)
+# mambapy      # only src/models/s4_models.py (Mamba/S4, WIP; import is guarded)
