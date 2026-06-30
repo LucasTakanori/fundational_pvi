@@ -7,6 +7,7 @@ from src.models.cnn_models import PviCNN
 from src.models.mlp_models import PviLinearRegression, PviMLP
 from src.models.s4_models import PviSamba
 from src.models.densenet_convlstm import PviDenseNetConvLSTM
+from src.models.mae_transformer import PviMaskedTransformer
 
 
 def ml_session_mapper(identifier: str):
@@ -15,7 +16,8 @@ def ml_session_mapper(identifier: str):
                     'cnn': PviCNN,
                     'crt': PviCNNTransformer,
                     'samba': PviSamba,
-                    'dnclstm': PviDenseNetConvLSTM}
+                    'dnclstm': PviDenseNetConvLSTM,
+                    'mae': PviMaskedTransformer}
 
     keywords = identifier.split(sep='-')
 
