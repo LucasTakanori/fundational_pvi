@@ -25,6 +25,7 @@ from src.foundation.multitask import (
     attach_multitask_heads, multitask_loss, MultiTaskWeights,
 )
 from src.foundation.evaluation import collect_predictions, evaluate, evaluate_ood
+from src.foundation.experiments import train_model, run_budget_curve
 
 __all__ = [
     "FoundationConfig",
@@ -41,4 +42,6 @@ __all__ = [
     "collect_predictions",
     "evaluate",
     "evaluate_ood",
+    "train_model",
+    "run_budget_curve",
 ]

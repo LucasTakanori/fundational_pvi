@@ -88,6 +88,10 @@ Training artifacts (checkpoints, results, the saved core) are written under
 - Two interchangeable cores (same `PviCore`, transfer via `load_core_state_dict`):
   **S** = supervised cohort core (`src/foundation/pretrain.py`); **U** = SSL core
   (`src/foundation/ssl_pretrain.py`, masked reconstruction + forecasting in `src/foundation/ssl.py`).
+- Multi-task heads (BP + maneuver/HR) in `src/foundation/multitask.py`; learned EIT
+  reconstruction in `src/models/eit_recon.py`.
+- `src/foundation/evaluation.py` (`evaluate`/`evaluate_ood`) + `experiments.py`
+  (`run_budget_curve`) drive the Exp A/B/C/G matrix into records for `budget_curves`.
 
 ## Notes
 
