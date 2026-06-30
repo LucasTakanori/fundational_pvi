@@ -18,6 +18,9 @@ from src.foundation.config import FoundationConfig
 from src.foundation.core import PviCore
 from src.foundation.readout import SubjectReadout
 from src.foundation.foundation_model import PviFoundationModel, SHARED_READOUT
+from src.foundation.ssl import (
+    PviSSLModel, random_channel_time_mask, split_past_future,
+)
 
 __all__ = [
     "FoundationConfig",
@@ -25,4 +28,7 @@ __all__ = [
     "SubjectReadout",
     "PviFoundationModel",
     "SHARED_READOUT",
+    "PviSSLModel",
+    "random_channel_time_mask",
+    "split_past_future",
 ]

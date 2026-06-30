@@ -50,8 +50,11 @@ All code is the package `src`, so **run scripts as modules from the repo root**:
 # Smoke test (no data needed)
 python -m pytest tests/test_smoke.py -q
 
-# Pretrain the shared core on the pooled population
+# Supervised cohort pretraining of the shared core (core S)
 python -m src.foundation.pretrain --input-mode signal --output-mode waveform --max-epochs 50
+
+# SSL pretraining of the shared core (core U): masked reconstruction + forecasting
+python -m src.foundation.ssl_pretrain --input-mode signal --max-epochs 50
 
 # Transfer the pretrained core to a held-out subject
 python -m src.foundation.transfer --subject subject013 \
@@ -82,6 +85,9 @@ Training artifacts (checkpoints, results, the saved core) are written under
   training set to a data budget (test set untouched) for the Exp A/B data-efficiency curves.
 - `src/analysis/budget_curves.py` aggregates per-run metrics (`cc_abs` via `bp_accuracy`,
   `amae`/`armse` via `metrics_waveform`) into mean±sem foundation-vs-individual curves and plots them.
+- Two interchangeable cores (same `PviCore`, transfer via `load_core_state_dict`):
+  **S** = supervised cohort core (`src/foundation/pretrain.py`); **U** = SSL core
+  (`src/foundation/ssl_pretrain.py`, masked reconstruction + forecasting in `src/foundation/ssl.py`).
 
 ## Notes
 

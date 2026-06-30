@@ -25,3 +25,9 @@ class FoundationConfig:
     mse_weight: float = 0.2         # base weight for MorphologyLoss
     min_epochs: int = 1
     max_epochs: int = 500
+
+    # --- SSL pretext (masked reconstruction + causal forecasting) ---
+    mask_ratio: float = 0.5         # fraction of channel x time entries hidden
+    horizon: int = 10               # forecast window length (time steps)
+    lambda_mask: float = 1.0        # weight on masked-reconstruction loss
+    lambda_forecast: float = 1.0    # weight on forecasting loss
