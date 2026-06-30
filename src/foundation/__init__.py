@@ -24,6 +24,7 @@ from src.foundation.ssl import (
 from src.foundation.multitask import (
     attach_multitask_heads, multitask_loss, MultiTaskWeights,
 )
+from src.foundation.evaluation import collect_predictions, evaluate, evaluate_ood
 
 __all__ = [
     "FoundationConfig",
@@ -37,4 +38,7 @@ __all__ = [
     "attach_multitask_heads",
     "multitask_loss",
     "MultiTaskWeights",
+    "collect_predictions",
+    "evaluate",
+    "evaluate_ood",
 ]
