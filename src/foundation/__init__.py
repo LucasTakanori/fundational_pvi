@@ -21,6 +21,9 @@ from src.foundation.foundation_model import PviFoundationModel, SHARED_READOUT
 from src.foundation.ssl import (
     PviSSLModel, random_channel_time_mask, split_past_future,
 )
+from src.foundation.multitask import (
+    attach_multitask_heads, multitask_loss, MultiTaskWeights,
+)
 
 __all__ = [
     "FoundationConfig",
@@ -31,4 +34,7 @@ __all__ = [
     "PviSSLModel",
     "random_channel_time_mask",
     "split_past_future",
+    "attach_multitask_heads",
+    "multitask_loss",
+    "MultiTaskWeights",
 ]
