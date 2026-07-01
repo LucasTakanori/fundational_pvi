@@ -1,7 +1,7 @@
 #!/bin/bash
 #SBATCH --job-name=foundation-ssl-pretrain
-#SBATCH --output=foundation-ssl-pretrain_%j.out
-#SBATCH --error=foundation-ssl-pretrain_%j.err
+#SBATCH --output=logs/foundation-ssl-pretrain_%j.out
+#SBATCH --error=logs/foundation-ssl-pretrain_%j.err
 #SBATCH --partition=ece_bst
 #SBATCH --account=ece_bst
 #SBATCH --nodes=1

@@ -1,7 +1,7 @@
 #!/bin/bash
 #SBATCH --job-name=foundation-crt-pretrain
-#SBATCH --output=foundation-crt-pretrain_%j.out
-#SBATCH --error=foundation-crt-pretrain_%j.err
+#SBATCH --output=logs/foundation-crt-pretrain_%j.out
+#SBATCH --error=logs/foundation-crt-pretrain_%j.err
 #SBATCH --partition=ece_bst
 #SBATCH --account=ece_bst
 #SBATCH --nodes=1

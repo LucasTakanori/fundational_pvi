@@ -1,7 +1,7 @@
 #!/bin/bash
 #SBATCH --job-name=foundation-mae-ssl
-#SBATCH --output=foundation-mae-ssl_%j.out
-#SBATCH --error=foundation-mae-ssl_%j.err
+#SBATCH --output=logs/foundation-mae-ssl_%j.out
+#SBATCH --error=logs/foundation-mae-ssl_%j.err
 #SBATCH --partition=ece_bst
 #SBATCH --account=ece_bst
 #SBATCH --nodes=1

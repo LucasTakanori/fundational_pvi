@@ -1,7 +1,7 @@
 #!/bin/bash
 #SBATCH --job-name=pvi-pytest
-#SBATCH --output=pytest_%j.out
-#SBATCH --error=pytest_%j.err
+#SBATCH --output=logs/pytest_%j.out
+#SBATCH --error=logs/pytest_%j.err
 #SBATCH --partition=ece_bst
 #SBATCH --account=ece_bst
 #SBATCH --nodes=1

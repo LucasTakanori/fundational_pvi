@@ -1,7 +1,7 @@
 #!/bin/bash
 #SBATCH --job-name=foundation-transfer
-#SBATCH --output=foundation-transfer_%j.out
-#SBATCH --error=foundation-transfer_%j.err
+#SBATCH --output=logs/foundation-transfer_%j.out
+#SBATCH --error=logs/foundation-transfer_%j.err
 #SBATCH --partition=ece_bst
 #SBATCH --account=ece_bst
 #SBATCH --nodes=1

@@ -1,7 +1,7 @@
 #!/bin/bash
 #SBATCH --job-name=foundation-pretrain
-#SBATCH --output=foundation-pretrain_%j.out
-#SBATCH --error=foundation-pretrain_%j.err
+#SBATCH --output=logs/foundation-pretrain_%j.out
+#SBATCH --error=logs/foundation-pretrain_%j.err
 #SBATCH --partition=ece_bst
 #SBATCH --account=ece_bst
 #SBATCH --nodes=1

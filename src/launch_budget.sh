@@ -1,7 +1,7 @@
 #!/bin/bash
 #SBATCH --job-name=exp-b-budget
-#SBATCH --output=exp-b-budget_%j.out
-#SBATCH --error=exp-b-budget_%j.err
+#SBATCH --output=logs/exp-b-budget_%j.out
+#SBATCH --error=logs/exp-b-budget_%j.err
 #SBATCH --partition=ece_bst
 #SBATCH --account=ece_bst
 #SBATCH --nodes=1

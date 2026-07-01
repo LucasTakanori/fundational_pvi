@@ -1,7 +1,7 @@
 #!/bin/bash
 #SBATCH --job-name=build-pvi-cache
-#SBATCH --output=build-pvi-cache_%j.out
-#SBATCH --error=build-pvi-cache_%j.err
+#SBATCH --output=logs/build-pvi-cache_%j.out
+#SBATCH --error=logs/build-pvi-cache_%j.err
 #SBATCH --partition=ece_bst
 #SBATCH --account=ece_bst
 #SBATCH --nodes=1
