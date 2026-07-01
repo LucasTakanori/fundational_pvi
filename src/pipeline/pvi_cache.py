@@ -38,7 +38,8 @@ def cache_key(cfg) -> dict:
         "output_mode": str(cfg.output_mode),
         "mask_key": str(cfg.mask_key),
         "test_size": float(cfg.test_size),
-        "split_mode": "disjoint",
+        "branch": str(getattr(cfg, "branch", "main")),
+        "split_mode": str(getattr(cfg, "split_mode", "disjoint")),
         "seed": int(getattr(cfg, "split_seed", 42)),
     }
 
@@ -105,8 +106,10 @@ def build_pvi_cache(cfg,
     cache_root = Path(cache_root)
     ds_root = resolve_data_root(ds_root)
     split_seed = int(getattr(cfg, "split_seed", 42))
+    branch = str(getattr(cfg, "branch", "main"))
+    split_mode = str(getattr(cfg, "split_mode", "disjoint"))
 
-    inventory = PviDatasetInventory(branch="main", ds_root=ds_root)
+    inventory = PviDatasetInventory(branch=branch, ds_root=ds_root)
     if len(inventory) == 0:
         raise FileNotFoundError(f"No HDF5 files under {inventory.target_dir}")
 
@@ -121,7 +124,7 @@ def build_pvi_cache(cfg,
     lazy.set_partition(
         test_size=cfg.test_size,
         shuffle=True,
-        split_mode="disjoint",
+        split_mode=split_mode,
         random_state=split_seed,
     )
     lazy.get_partition()

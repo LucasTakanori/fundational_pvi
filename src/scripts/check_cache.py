@@ -15,12 +15,16 @@ def main() -> int:
     p.add_argument("--input-mode", default="impedance")
     p.add_argument("--output-mode", default="waveform")
     p.add_argument("--mask-key", default="mask05")
+    p.add_argument("--branch", default="main")
+    p.add_argument("--split-mode", default="disjoint")
     args = p.parse_args()
 
     cfg = FoundationConfig(
         input_mode=args.input_mode,
         output_mode=args.output_mode,
         mask_key=args.mask_key,
+        branch=args.branch,
+        split_mode=args.split_mode,
     )
     if cache_is_valid(args.cache_root, cfg):
         m = load_manifest(args.cache_root)

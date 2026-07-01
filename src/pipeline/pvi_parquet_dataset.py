@@ -181,14 +181,16 @@ class PviParquetCohort(PviConfiguredDataset):
                 setattr(self, kw, state_dict[kw])
 
     def get_raw_statistics(self) -> dict[str, float | int]:
-        return {
-            "sqi": 0.0,
-            "num_periods": self.num_periods,
-            "num_seq01": 0,
-            "num_seq05": int(self.manifest.get("num_train", 0) + self.manifest.get("num_test", 0)),
-            "num_seq10": 0,
-            "num_seq15": 0,
-        }
+        # SQI (signal quality index) is computed from raw HDF5 masks, which the
+        # cache-materialized rows don't carry; not reconstructable from Parquet alone.
+        # Report the true sequence count against the *actual* mask_key used to build the
+        # cache, not a hardcoded 'mask05' bucket regardless of config (PLAN.md §7 note).
+        total = int(self.manifest.get("num_train", 0) + self.manifest.get("num_test", 0))
+        counts = {f"num_seq{k}": 0 for k in ("01", "05", "10", "15")}
+        mask_suffix = str(self.mask_key.value if hasattr(self.mask_key, "value") else self.mask_key)
+        mask_suffix = mask_suffix.replace("mask", "") or "05"
+        counts[f"num_seq{mask_suffix}"] = total
+        return {"sqi": None, "num_periods": self.num_periods, **counts}
 
     def get_params_shallow(self) -> dict:
         counts = {

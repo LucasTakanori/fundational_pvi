@@ -520,17 +520,23 @@ Verified availability (2026-07-01), ranked by how directly usable each is:
   unconfirmed — verify whether this is a genuine large-scale pretrained representation or
   a synthetic-data demo/validation checkpoint before relying on it; single-channel-oriented
   (PPG/ECG), so also needs multi-channel handling similar to NormWear's approach.
-- **UTransBPNet** — **not pursued for now**: no public code or weights found anywhere
-  searched. Its own reported number (Pearson r≈0.61 for SBP, i.e. r²≈0.37) is not clearly
-  better than what we can already reproduce from the literature benchmark (§10.1: PD15
-  r²=0.32; PW15 r²=0.85 in-distribution), and it's unclear whether its "cross-scenario"
-  evaluation (drink/exercise/MIMIC) tests cross-**subject** generalization the way our
-  disjoint/holdout protocol does, or cross-**activity** within the same cohort — a
-  related but different claim. Adopting it would mean reimplementing a full U-Net+SE+
-  cross-attention architecture from the paper description alone with no pretrained
-  starting point and no confirmed benchmark advantage — exactly the expensive,
-  low-information path §8.2 exists to avoid. Revisit if the full paper (not yet read)
-  clarifies the evaluation protocol and the comparison looks more favorable.
+- **UTransBPNet** — **reconsidered, now worth building** (revised from an earlier "not
+  pursued"): no public code or weights exist anywhere searched, so this still needs a
+  from-scratch reimplementation (U-Net+SE short-range extractor + transformer+
+  cross-attention long-range) — that part of the objection stands. But the original
+  reasoning weighted reimplementation cost together with *training* cost, and §7.7's fix
+  removes most of the latter: once a (branch, split_mode) Parquet cache exists, training is
+  fast, so the marginal cost of running a from-scratch UTransBPNet across PW/PD/holdout
+  (the same three protocols as everything else in §10.1) is now mostly the one-time
+  architecture-implementation effort, not recurring GPU-days. That's a real, bounded cost,
+  not the open-ended one §8.2 is meant to guard against. Its own reported number
+  (Pearson r≈0.61 for SBP, i.e. r²≈0.37) still isn't confirmed better than our literature
+  benchmark, and it's still unclear whether its "cross-scenario" evaluation tests
+  cross-**subject** generalization or cross-**activity** within the same cohort — but now
+  that running it ourselves under our exact PW/PD/holdout protocols is cheap, actually
+  running it is a faster way to resolve that uncertainty than continuing to debate it from
+  the abstract alone. Promoted to the §9 milestone list, sequenced with the rest of §3.8's
+  cheap-fine-tuning-pass items (once §7.7's fix lands and the three cache variants exist).
 
 **Positioning note.** Foundation models for wearable physiological sensing exist
 (NormWear, HiMAE) but aren't BP-specific or evaluated as a population-pretrained
@@ -696,6 +702,44 @@ calibration mechanisms rather than assume the cheapest one.
 Every current number is n=1 subject (013), n=1 seed. Not wrong for early debugging, but no
 curve should go in a figure until run across a real held-out cohort (§6, last bullet).
 
+### 7.7 Parquet cache only supported one (branch, split_mode) pair — fixed 2026-07-01
+Investigated whether the fast Parquet cache (`src/pipeline/pvi_cache.py`) faithfully
+mirrors the original lazy-HDF5 pipeline, prompted by a request to run PW/PD/holdout
+protocols via the fast path. Findings:
+
+- **Where it applies, it's faithful, not a reimplementation.** `build_pvi_cache()`
+  constructs the *same* `PviLazyDataset`, calls the *same* `set_partition()` (so the
+  disjoint split still goes through `GraphBipartitePartitioner`, unchanged), and
+  materializes rows via the *same* `h5io.format_raw_tensors`/`slice_sequences` functions
+  the lazy path uses live — so cached tensor values are identical to what the lazy path
+  would produce, not independently re-derived. There's also existing defensive code
+  guarding against the mask-aliasing bug already documented in this plan's history. Good.
+- **But it only ever supported one protocol**: `cache_key()` hardcoded
+  `"split_mode": "disjoint"` and `build_pvi_cache()` hardcoded `branch="main"` — there was
+  no way to build a Parquet cache for PW (`split_mode="within"`) or the true holdout
+  cohort (`branch="holdout"`, §7.1). Worse, `PviParquetCohort.set_partition()` silently
+  *ignored* any `split_mode` passed to it once a cache was loaded — a real landmine: asking
+  for PW while a disjoint cache was active would have silently served the disjoint split.
+  `pretrain.py`/`ssl_pretrain.py`'s `build_population_dataset()` had the identical
+  hardcoding one layer up, in both the lazy and Parquet code paths.
+- **Fixed**: `FoundationConfig` now has `branch` and `split_mode` fields (defaults
+  unchanged: `"main"`/`"disjoint"`); `cache_key()`/manifest include both, so
+  `cache_is_valid()` now correctly rejects a cache built for the wrong pair instead of
+  silently serving it; `build_pvi_cache()`, `build_population_dataset()` (both code paths),
+  and the `build_pvi_cache.py`/`check_cache.py`/`pretrain.py`/`ssl_pretrain.py` CLIs all
+  thread `branch`/`split_mode` through instead of hardcoding. Also fixed a related cosmetic
+  bug: `PviParquetCohort.get_raw_statistics()` reported `sqi=0.0` and bucketed every
+  sequence count under `num_seq05` regardless of the real `mask_key` — now reports `None`
+  for the unreconstructable SQI and the count under the correct bucket. Covered by new
+  tests in `tests/test_pvi_cache.py` (manifest correctly rejects a mismatched
+  branch/split_mode; stats report the true mask bucket).
+- **Operational implication**: build a separate cache directory per (branch, split_mode)
+  pair you need — e.g. `${PVI_CACHE_ROOT}_main_disjoint`, `${PVI_CACHE_ROOT}_main_within`,
+  `${PVI_CACHE_ROOT}_holdout_disjoint` — via `python -m src.scripts.build_pvi_cache
+  --branch ... --split-mode ...`, and point `--cache-root`/`PVI_CACHE_ROOT` at whichever is
+  needed for a given run. Same pattern already used for `input_mode` variants (`v1` vs.
+  `v1_impedance` in the run history, §10.6).
+
 ---
 
 ## 8. Additional design notes from critical review (2026-07-01)
@@ -730,42 +774,53 @@ pillar landing successfully with compute to spare.
    candidate or a benchmark (§10.3–10.6 relabeled accordingly).
 5. **Next**: resolve §7.1–7.4 (holdout wiring, compute-plan correction, Core U scale bug,
    SSL probe monitoring) — cheap, unblocks everything downstream.
-6. **Tier-1 architecture updates (§3.7), before/alongside production pretraining**:
+6. ~~Parquet cache only supported one (branch, split_mode) pair.~~ **Fixed (§7.7)** —
+   `build_pvi_cache.py`/`check_cache.py`/`pretrain.py`/`ssl_pretrain.py` now all accept
+   `--branch`/`--split-mode`; a cache correctly rejects a mismatched config instead of
+   silently serving the wrong split. **Next**: actually build the three cache variants on
+   the cluster — `main`+`disjoint` (PD, exists), `main`+`within` (PW, new), `holdout`+
+   `disjoint` (new) — via `python -m src.scripts.build_pvi_cache --branch ... --split-mode
+   ...`, before any of the PW/PD/holdout runs below can actually go fast.
+7. **Tier-1 architecture updates (§3.7), before/alongside production pretraining**:
    replace `RRPE` with RoPE in `crt`; add the gradient-reversal subject-adversarial
    auxiliary head (available to any core). Both are cheap, low-risk, and should land before
    the production pretrain runs so the primary cores already reflect them, rather than
    being bolted on after the fact.
-7. **Cheap external-checkpoint fine-tuning pass (§3.8)**, run in parallel with steps 6/8,
+8. **Cheap external-checkpoint fine-tuning pass (§3.8)**, run in parallel with steps 7/9,
    not competing for the same GPU-week-scale budget: adapter-based fine-tune of PITN
    (highest priority — public weights, same task, possibly same modality), HuBERT-ECG, and
    NormWear on our data; verify HiMAE's checkpoint provenance before relying on it. Only
    promote any of these to full from-scratch treatment (§3.7 Tier 2/3) if the cheap trial
    actually looks good — this is how "try all of them" gets done without violating §8.2's
-   scope discipline.
-8. Production Core S candidates (`crt` **and** `samba`, both BioZ/impedance — §3.5, §4
+   scope discipline. **Also**: build UTransBPNet from its paper description (no available
+   weights, so this one is a from-scratch build, not a fine-tune) and run it — with the
+   other Tier-1/2/3 candidates you want tried broadly per your direction — across all three
+   protocols (PW/PD/holdout) using the now-fast Parquet cache (step 6), directly
+   comparable to §10.1's benchmark table.
+9. Production Core S candidates (`crt` **and** `samba`, both BioZ/impedance — §3.5, §4
    elevates `samba` to co-primary) and Core U (`mae`, impedance) pretrain to convergence,
    exporting best (not last) checkpoint, evaluated once on `branch="holdout"`. Prioritize
    scaling Core U's pretraining data footprint/task diversity over Core S's parameter count
    (§3.5 — the evidence argues against naive supervised-model scaling).
-9. Exp A/B (with the matched-capacity control, §8.1, the 3 calibration mechanisms §3.2, and
-   the shape/bias/label-gap diagnostics §3.3) across a real held-out cohort (≥10–20
-   subjects × ≥3 seeds), paired statistics.
-10. Exp C (OOD across maneuvers) — the second pillar.
-11. Exp G (Core U vs Core S) once both are at production scale and §7.3 is resolved.
-12. Shape/bias/label-gap decomposition (§3.3) applied retroactively to all of the above.
-13. **Core U, variant 2**: discretized/tokenized SSL pretext (§3.6) — only once the
-    baseline continuous-SSL Core U is validated (step 8 + §7.4's linear-probe monitoring
+10. Exp A/B (with the matched-capacity control, §8.1, the 3 calibration mechanisms §3.2, and
+    the shape/bias/label-gap diagnostics §3.3) across a real held-out cohort (≥10–20
+    subjects × ≥3 seeds), paired statistics.
+11. Exp C (OOD across maneuvers) — the second pillar.
+12. Exp G (Core U vs Core S) once both are at production scale and §7.3 is resolved.
+13. Shape/bias/label-gap decomposition (§3.3) applied retroactively to all of the above.
+14. **Core U, variant 2**: discretized/tokenized SSL pretext (§3.6) — only once the
+    baseline continuous-SSL Core U is validated (step 9 + §7.4's linear-probe monitoring
     shows it's learning something useful). Evaluated specifically against whether it moves
     the shape term of §3.3's decomposition more than continuous SSL does.
-14. **Tier-2/3 architecture exploration (§3.7)**, if the Tier-1-updated primary spine
-    (step 6/8) or the cheap fine-tuning pass (step 7) shows promise: TimesNet-style
+15. **Tier-2/3 architecture exploration (§3.7)**, if the Tier-1-updated primary spine
+    (step 7/9) or the cheap fine-tuning pass (step 8) shows promise: TimesNet-style
     periodicity-aware encoder, HiMAE-style multi-resolution SSL, and any promoted
     checkpoint-fine-tune candidates given full from-scratch treatment. Not before the
     primary pillars land; see §8.2 scope discipline.
-15. If time/compute remain: Exp D/E (interpretability, with the physiology-grounding
+16. If time/compute remain: Exp D/E (interpretability, with the physiology-grounding
     caveat from §5), Exp F / `dnclstm` (EIT forward-operator porting now more feasible per
     §3.4's update, still secondary since image≈BioZ accuracy per §10.1).
-16. Once a core generalizes well (Exp B/C/G land): consider distillation into a smaller
+17. Once a core generalizes well (Exp B/C/G land): consider distillation into a smaller
     deployable model (§3.5) — a deployment step, not a substitute for getting
     generalization right first. HiMAE (§3.7) suggests resolution-aware SSL may partly
     solve this by architecture rather than requiring a separate distillation pass.

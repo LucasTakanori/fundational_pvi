@@ -118,6 +118,10 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument("--ssl-arch", default=None, dest="ssl_arch",
                    help="Override SSL arch (defaults to --arch).")
     p.add_argument("--mask-key", default="mask05")
+    p.add_argument("--branch", default="main",
+                   help="TrainingBranch: main|holdout|longitudinal (PLAN.md §7.1).")
+    p.add_argument("--split-mode", default="disjoint",
+                   help="SplitMode: disjoint (PD) | within (PW) | global (PLAN.md §3.8/§9).")
     p.add_argument("--num-features", type=int, default=512)
     p.add_argument("--num-hidden-layers", type=int, default=6)
     p.add_argument("--mask-ratio", type=float, default=0.5)
@@ -144,6 +148,8 @@ if __name__ == "__main__":
     cfg = FoundationConfig(input_mode=args.input_mode,
                            output_mode=args.output_mode,
                            mask_key=args.mask_key,
+                           branch=args.branch,
+                           split_mode=args.split_mode,
                            arch=args.arch,
                            ssl_arch=args.ssl_arch,
                            num_features=args.num_features,

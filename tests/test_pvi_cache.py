@@ -15,7 +15,7 @@ from src.pipeline.pvi_cache import (
     cache_key,
     manifest_matches,
 )
-from src.pipeline.pvi_parquet_dataset import PviParquetSplit
+from src.pipeline.pvi_parquet_dataset import PviParquetSplit, PviParquetCohort
 
 
 def _write_mini_cache(tmp_path: Path) -> Path:
@@ -71,6 +71,43 @@ def test_manifest_matches_and_cache_valid(tmp_path):
     manifest = json.loads((root / "manifest.json").read_text(encoding="utf-8"))
     assert manifest_matches(manifest, cfg)
     assert cache_is_valid(root, cfg)
+
+
+def test_cache_key_includes_branch_and_split_mode():
+    """A cache is only valid for the exact (branch, split_mode) it was built for --
+    PLAN.md §3.8/§9: PW ('within'), PD ('disjoint'), and the true holdout branch must
+    never be silently interchanged."""
+    key_main_disjoint = cache_key(FoundationConfig(branch="main", split_mode="disjoint"))
+    key_main_within = cache_key(FoundationConfig(branch="main", split_mode="within"))
+    key_holdout_disjoint = cache_key(FoundationConfig(branch="holdout", split_mode="disjoint"))
+
+    assert key_main_disjoint["branch"] == "main"
+    assert key_main_disjoint["split_mode"] == "disjoint"
+    # Different split_mode or branch must produce a different (non-matching) key.
+    assert key_main_disjoint != key_main_within
+    assert key_main_disjoint != key_holdout_disjoint
+    assert key_main_within != key_holdout_disjoint
+
+
+def test_cache_built_for_one_split_mode_rejected_by_a_different_config(tmp_path):
+    """A PW-built cache must not silently satisfy a PD (disjoint) config, and vice versa --
+    this is exactly the gap that made 'run PW/PD/holdout via the fast path' unsupported."""
+    root = _write_mini_cache(tmp_path)  # built with default cfg: branch=main, split_mode=disjoint
+    assert cache_is_valid(root, FoundationConfig(branch="main", split_mode="disjoint"))
+    assert not cache_is_valid(root, FoundationConfig(branch="main", split_mode="within"))
+    assert not cache_is_valid(root, FoundationConfig(branch="holdout", split_mode="disjoint"))
+
+
+def test_parquet_cohort_reports_true_mask_bucket(tmp_path):
+    """get_raw_statistics() must report the sequence count under the mask_key actually
+    used to build the cache, not a hardcoded 'mask05' bucket regardless of config."""
+    root = _write_mini_cache(tmp_path)
+    ds = PviParquetCohort(cache_root=root, input_mode="signal",
+                          output_mode="waveform", mask_key="mask10").build()
+    stats = ds.get_raw_statistics()
+    assert stats["num_seq10"] == ds.manifest["num_train"] + ds.manifest["num_test"]
+    assert stats["num_seq05"] == 0
+    assert stats["sqi"] is None  # not reconstructable from Parquet alone; must not fake 0.0
 
 
 def test_parquet_split_getitem(tmp_path):

@@ -63,14 +63,18 @@ def resolve_cache_root(cfg: FoundationConfig) -> str | None:
 
 
 def build_population_dataset(cfg: FoundationConfig, ds_root=None):
+    branch = getattr(cfg, "branch", "main")
+    split_mode = getattr(cfg, "split_mode", "disjoint")
+
     cache_root = resolve_cache_root(cfg)
     if cache_root:
-        print(f"[pretrain] using Parquet cache at {cache_root}", flush=True)
+        print(f"[pretrain] using Parquet cache at {cache_root} "
+              f"(branch={branch}, split_mode={split_mode})", flush=True)
         ds = PviParquetCohort.from_cache(cache_root, cfg).build()
         ds.set_partition(
             test_size=cfg.test_size,
             shuffle=True,
-            split_mode="disjoint",
+            split_mode=split_mode,
             random_state=cfg.split_seed,
         )
         ds.get_partition()
@@ -83,7 +87,7 @@ def build_population_dataset(cfg: FoundationConfig, ds_root=None):
         ds.set_dataloaders(**loader_kw)
         return ds
 
-    inventory = PviDatasetInventory(branch="main", ds_root=ds_root)
+    inventory = PviDatasetInventory(branch=branch, ds_root=ds_root)
     if len(inventory) == 0:
         raise FileNotFoundError(
             f"No '*_masked.h5' datasets found under '{inventory.target_dir}'. "
@@ -105,7 +109,7 @@ def build_population_dataset(cfg: FoundationConfig, ds_root=None):
     ds.set_partition(
         test_size=cfg.test_size,
         shuffle=True,
-        split_mode="disjoint",
+        split_mode=split_mode,
         random_state=cfg.split_seed,
     )
     ds.get_partition()
@@ -179,6 +183,10 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument("--input-mode", default="signal")
     p.add_argument("--output-mode", default="waveform")
     p.add_argument("--mask-key", default="mask05")
+    p.add_argument("--branch", default="main",
+                   help="TrainingBranch: main|holdout|longitudinal (PLAN.md §7.1).")
+    p.add_argument("--split-mode", default="disjoint",
+                   help="SplitMode: disjoint (PD) | within (PW) | global (PLAN.md §3.8/§9).")
     p.add_argument("--arch", default="mlp", help="Core architecture: mlp|crt|mae|cnn (see PLAN.md §4).")
     p.add_argument("--num-features", type=int, default=512)
     p.add_argument("--num-hidden-layers", type=int, default=6)
@@ -205,6 +213,8 @@ if __name__ == "__main__":
     cfg = FoundationConfig(input_mode=args.input_mode,
                            output_mode=args.output_mode,
                            mask_key=args.mask_key,
+                           branch=args.branch,
+                           split_mode=args.split_mode,
                            arch=args.arch,
                            num_features=args.num_features,
                            num_hidden_layers=args.num_hidden_layers,

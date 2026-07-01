@@ -11,8 +11,12 @@ class FoundationConfig:
     mask_key: str = "mask05"        # SequenceMask value: mask01|mask05|mask10|mask15
     test_size: float = 0.1
     split_seed: int = 42            # disjoint subject shuffle (lazy + parquet cache)
+    branch: str = "main"            # TrainingBranch: main|holdout|longitudinal (PLAN.md §7.1)
+    split_mode: str = "disjoint"    # SplitMode: disjoint (PD) | within (PW) | global
 
     # --- parquet cache (set PVI_CACHE_ROOT or pass --cache-root) ---
+    # NOTE: a cache is built for exactly one (branch, split_mode) pair (PLAN.md §3.8/§9) --
+    # build separate cache directories per pair and point --cache-root at the right one.
     cache_root: str | None = None     # overrides env when set
     cache_num_workers: int = 8        # DataLoader workers when training from cache
 

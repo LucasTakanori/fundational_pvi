@@ -23,6 +23,11 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument("--mask-key", default="mask05")
     p.add_argument("--test-size", type=float, default=0.1)
     p.add_argument("--split-seed", type=int, default=42)
+    p.add_argument("--branch", default="main",
+                   help="TrainingBranch: main|holdout|longitudinal (PLAN.md §7.1).")
+    p.add_argument("--split-mode", default="disjoint",
+                   help="SplitMode: disjoint (PD, subject-holdout) | within (PW, "
+                        "same-subjects-in-train-and-test) | global.")
     p.add_argument("--shard-rows", type=int, default=8192)
     p.add_argument("--ds-root", default=None)
     p.add_argument(
@@ -47,6 +52,8 @@ def main() -> None:
         mask_key=args.mask_key,
         test_size=args.test_size,
         split_seed=args.split_seed,
+        branch=args.branch,
+        split_mode=args.split_mode,
     )
 
     if not args.force and cache_is_valid(args.cache_root, cfg):
