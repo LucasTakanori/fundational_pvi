@@ -16,17 +16,22 @@ subjects (216 sessions: baseline, Valsalva, cold-pressor) with continuous arteri
 recorded simultaneously. The applied goal is **cuffless blood pressure estimation** —
 predicting continuous BP from bioimpedance signals without a cuff.
 
-We already have direct evidence that the straightforward approach — train a supervised
-model end-to-end per architecture, pooled across subjects — **does not generalize across
-subjects**. In `ml-experiments` (a separate, more mature codebase), the same CRT
-architecture trained with a `split_mode="local"` protocol (test *sequences* held out, but
-from subjects that were also in the training set) reaches cc_abs **0.928**. The identical
-architecture family evaluated under `split_mode="disjoint"` (entire subjects held out) — the
-protocol that actually tests generalization to a new person — collapses to **~0.46 peak,
-0.21 by the end of training** (`abl-crtsin-bioz-to-waveform`). That's a ~0.5 Pearson-r gap
-between "the model has seen this person before" and "the model has not," and it is the
-central empirical fact motivating this project: **naively pooling data across subjects and
-training one model does not produce a representation that transfers to new people.**
+We already have direct, paired evidence that the straightforward approach — train a
+supervised model end-to-end per architecture, pooled across subjects — **does not
+generalize across subjects**. The clearest single fact: in the Nature paper's own
+architecture sweep (Wang lab; 20 "population-within" (PW) models, §10.1), the *identical
+trained model* `pw15` (CRT, BioZ input, waveform output) scores **AMAE 3.69 mmHg /
+r²=0.85 on its own in-distribution test split**, and **AMAE 9.85 mmHg / r²=0.07** when the
+*same weights* are evaluated on a true holdout set of unseen subjects. Same architecture,
+same capacity, same task — the only thing that changed is whether the test subject was
+represented in training, and r² collapses by ~12x. This pattern holds across every
+architecture and modality in the sweep (§10.1), and our own separate `ml-experiments`
+codebase shows the same shape (CRT: cc_abs 0.928 on `split_mode="local"` vs. ~0.46 peak /
+0.21 final on `split_mode="disjoint"`, `abl-crtsin-bioz-to-waveform`). This is the central
+empirical fact motivating this project: **naively pooling data across subjects and training
+one model does not produce a representation that transfers to new people — and this isn't a
+capacity or architecture problem** (see §3.5: the paper's own ablation shows more parameters
+didn't fix it either). It's a generalization problem, specifically.
 
 ### 1.2 Why "foundation model," specifically
 
@@ -58,9 +63,13 @@ signal (SBP/DBP, or a stereotyped cardiac waveform dominated by a handful of phy
 parameters — stroke volume, vascular resistance, arterial stiffness, HR). This is a real,
 load-bearing difference from the source paper and it must shape what we claim:
 
-- **We are not claiming** that a low-dimensional target makes the problem easy or that
-  accuracy should saturate quickly. See the hypothesis in §3.3 for why this specific
-  intuition is likely wrong, and what to test instead.
+- **We are not claiming** that low output dimensionality alone predicts *generalization*.
+  It does predict that *in-distribution* accuracy is fast and good — and the data bears
+  this out (§10.1: PW/SS in-distribution AMAE 3.7–4.7 mmHg, r² up to 0.85, reached in a few
+  hundred epochs). What it does *not* predict, and what the same data shows breaking down
+  completely (the pw15 example in §1.1: r² 0.85 → 0.07, same weights, only the test subject
+  changed), is cross-subject generalization. In-distribution fit quality and generalization
+  are close to decoupled properties in this domain — see §3.3 for why, and what to test.
 - **We are not claiming** BP prediction is a rich enough readout target to support
   Wang-et-al.-scale "digital twin" / "functional barcode" interpretability claims (Exp D/E)
   as *primary* results. They're demoted to secondary/exploratory (§5).
@@ -151,13 +160,18 @@ into Exp B, see §5).
 ### 3.3 Hypothesis: population pretraining separates cleanly into a "shape" problem and a
 "calibration" problem — and only the shape problem benefits from pooling
 
-**Do not assume "BP is low-dimensional, so we should get high accuracy fast."** This
-intuition conflates two different things and is already contradicted by one of our own
-results (§6.3): Core U at the 64-min budget reaches `cc_abs = 0.307` (a plausible-looking
-correlation) alongside `AMAE = 98 mmHg` (a physiologically impossible absolute error). Low
-dimensionality made a *correlation-shaped* metric look reasonable quickly, while the
-*absolute* number that actually matters clinically (and is what AAMI/BHS standards grade)
-was nowhere close.
+**Do not assume "BP is low-dimensional, so we should get high accuracy fast."** In-distribution,
+that part is actually true (§10.1: PW/SS AMAE 3.7–4.7 mmHg, fast). What it does not predict
+is generalization, and — separately — it does not predict that a *correlation-shaped*
+metric (r²/cc_abs looking good) implies *absolute* accuracy is good. We have **two
+independent confirmations** of that second trap: our own Core U at the 64-min budget
+reaches `cc_abs = 0.307` (plausible-looking) alongside `AMAE = 98 mmHg` (physiologically
+impossible) (§10.5); and in the literature sweep, `ss09`/`ss11` (CNN, subject-specific)
+show r²≈0.37–0.57 (looks fine) alongside **AMAE 26–29 mmHg** (also physiologically
+impossible) (§10.1). Two different architectures, two different datasets, the same failure
+signature: a shape-shaped metric can look reasonable while the absolute number that
+actually matters clinically is broken. Treat this as a real, recurring failure mode to
+guard against, not a one-off bug — see §6 for the reporting standard this motivates.
 
 The reason this isn't a fluke: Wang et al.'s foundation-model argument doesn't come from
 "neural activity is high-dimensional, therefore hard, therefore benefits from pretraining."
@@ -176,6 +190,16 @@ component of BP prediction quickly (small data), but the *absolute/calibration* 
 remains subject-specific and does not improve much with more pretraining — it needs a
 small amount of per-subject correction regardless of core quality.
 
+**Independent supporting evidence for the affine-correction idea specifically**: in the
+literature sweep (§10.1), a *per-subject linear regression* (`ss03`, subject-specific,
+BioZ→waveform) reaches AMAE **5.0 mmHg** — competitive with the far more complex CRT/CRS
+subject-specific models. That's evidence that *within one subject*, the impedance→BP
+relationship is already close to affine/well-conditioned — the hard, nonlinear problem is
+in the *cross-subject* mapping (representation learning), not the per-subject calibration
+step. This is exactly the asymmetry the affine-correction mechanism (§3.2, item 3) is built
+to exploit: let the core carry the hard cross-subject nonlinearity, and keep the per-subject
+correction as simple as the data suggests it can be.
+
 **How we test it** (a new, explicit analysis axis, not just reporting cc_abs and AMAE
 side by side as unrelated numbers): decompose every evaluation into —
 - **Shape term**: correlation between predicted and true BP trajectory (extend beyond the
@@ -184,6 +208,15 @@ side by side as unrelated numbers): decompose every evaluation into —
 - **Corrected accuracy**: fit a per-subject affine correction (scale + offset, 2
   parameters, using only a handful of calibration points from the target subject) on top
   of the core+readout prediction, then re-report AMAE/BHS/AAMI.
+- **Label gap** (adopted from the source paper's own robustness methodology, §10.1): a
+  model-independent measure of how far a target subject's/session's BP distribution differs
+  from the training cohort's. The paper found holdout-set label gap ≈2.6x the typical
+  train-test label gap, and (for LR/MLP) correlation between label gap and AMAE of
+  0.44–0.61. Adopt this directly as a diagnostic: compute label gap for every subject in
+  our own holdout set (§7.1) *before* trusting it as representative, and pair it with the
+  shape/bias decomposition above to separate "this subject transfers poorly because of a
+  measurable distribution shift" from "this subject transfers poorly for some other,
+  unexplained reason" (architecture, insufficient calibration data, non-affine effects).
 
 **Potential findings and what each would mean:**
 - *If the hypothesis holds* (shape term improves fast with pretraining; a 2-parameter
@@ -230,6 +263,78 @@ pillar**, not further architecture work. Decision point, to resolve early:
   transfer performance, and do not claim physical grounding in the paper — let the
   generalization numbers carry the argument instead.
 
+**Update (2026-07-01)**: a real forward operator likely already exists. The excerpted paper
+methods describe a FEM/CEM (complete electrode model) forward solver with a one-step
+Gauss-Newton linearized inverse, built in MATLAB (`distmesh` triangulation, first-order
+Lagrange FEM, reciprocity-theorem Jacobian) — almost certainly what already produces the
+`img` field in the HDF5 data. This changes the blocker from "unknown geometry, needs
+acquisition" to "existing MATLAB artifact, needs porting" (export the stiffness
+matrix/Jacobian/electrode injection-measurement pattern into `EITForwardOperator.weight`) —
+a well-scoped engineering task. That said, the paper explicitly reports **image and BioZ
+inputs "yielded similar results"** for BP accuracy (§10.1), so this track's justification
+should stay the generalization/interpretability angle (§3.4's original motivation, and Exp
+F), not an accuracy claim — it remains secondary priority under §8.2's scope discipline.
+
+### 3.5 Model scale: what "bigger" should mean here, and what it should not
+
+The project's working hypothesis has shifted from validating pipeline scaffolds (small MLP
+cores, `signal` input — useful only for testing the core/readout/transfer wiring, see
+§4 and §10.3) toward training a substantially larger foundation core intended to learn
+population-level structure and, eventually, be distilled into something deployable. This
+section is about what "bigger" should concretely mean, because the evidence in §10.1
+argues against the naive version of that idea.
+
+**Against naive scaling.** The paper's own ablation study (Extended Data Table 3) found
+that compressing PW15 (CRT, 7.5M params) to 2.12M params via depth reduction *slightly
+improved* every metric — the authors' own conclusion was the extra depth was "redundant at
+this scale." CRT (7.5M) and CRS (~2.5M, a ~3x smaller Samba-based hybrid) land within noise
+of each other on every protocol (PW: 3.69 vs 3.80 AMAE; PD: 9.07 vs 9.30). **On this task,
+this data volume, trained the same single-task-supervised way, more capacity did not buy
+more generalization — it had already plateaued.** A bigger version of the same supervised
+recipe is not well-supported by the evidence as a fix for the §1.1 generalization problem.
+
+**What the evidence does support.** The paper's own diagnosis for *why* PW/PD models don't
+generalize is **data breadth**, not capacity: *"the limited generalizability of CRT models
+likely arises from insufficient data breadth, which prevents the learned representations
+from extending to out-of-distribution subjects"* — and they explicitly contrast their
+~225h/91-subject dataset against industry datasets with "hundreds of thousands of
+individuals and millions of hours." We cannot get that much more data, but we can get more
+**effective** breadth per subject/session by not requiring every training example to carry
+a synchronized BP label — which is exactly what Core U (self-supervised, §3.1) is for.
+**A large core earns its capacity through a data-hungry, label-free pretraining objective
+that can draw on more of the available signal (all sessions, all maneuvers, not just the
+BP-labeled/synchronized subset) — not through inflating the existing single-task supervised
+CRT/CRS recipe.** Concretely: prioritize scaling Core U's pretraining data footprint and
+task diversity (multi-task pretext: masked reconstruction + forecasting + possibly
+contrastive/multi-session objectives) over scaling Core S's parameter count.
+
+**Inductive bias matters more than raw size.** The robustness analysis in §10.1 is telling
+on this point: CNN (moderate capacity, no recurrence/attention) is the *least* stable
+architecture in the entire sweep — SS AMAE ranging 4.77–56.8 mmHg with no significant
+correlation to any diagnostic metric (and directly visible in our own numbers: `ss09`/`ss11`
+show plausible r² alongside AMAE 26–29 mmHg — the same shape-vs-calibration disconnect as
+Core U, §3.3, §7.3, independently confirmed). CRT/CRS (recurrence + attention, matched to
+the cardiac-cycle-structured signal) are the stable, generalization-favoring choices, and
+this holds longitudinally too (§10.1: CRT degrades 1.21 mmHg over 5 days without
+recalibration vs. 21.21 mmHg for linear regression). **The scaling axis that has evidence
+behind it is temporal/structural (context length, attention depth, cross-session
+conditioning) within the CRT/CRS family — not raw width/depth of an architecture that's
+already shown to be capacity-saturated for the supervised task.**
+
+**Elevated priority: CRS/`samba`.** This also means `samba` (the CRS analog) should not be
+treated as a deprioritized WIP architecture (as an earlier version of this plan had it). In
+the paper's own sweep, CRS *wins* the subject-specific table outright (`ss17`: AMAE 4.09,
+the best number in any table) and is statistically indistinguishable from CRT everywhere
+else, including longitudinal robustness. It's promoted to co-primary alongside `crt` (§4).
+
+**Distillation.** Distilling a large pretrained core into a smaller deployable model is a
+sound *deployment* step once the core has actually learned something a smaller model
+couldn't — but distillation transfers a teacher's existing knowledge, it does not create
+generalization the teacher didn't have. The generalization gain has to come from the
+data-breadth/self-supervision argument above, not from the distillation step itself, so
+Core U's pretraining quality (not the eventual student's size) is the thing to get right
+first.
+
 ---
 
 ## 4. Models
@@ -241,23 +346,26 @@ transferable via the same mechanism. Selected via `arch` tag through
 
 | Tag | Class | Best input | Role | Priority |
 |-----|-------|------------|------|----------|
-| `crt` | `PviCNNTransformer` | impedance (64ch) | **Primary Core S** — conv + LSTM positional encoder + transformer. Matches the architecture family with the best existing (non-foundation) results (PW15, 0.928 local / ~0.46 disjoint), so it's the most de-risked choice for the supervised core. | **Primary** |
-| `mae` | `PviMaskedTransformer` | impedance, image patches | **Primary Core U** — tokenized MAE-style encoder, natural fit for the masked-reconstruction pretext. | **Primary** |
-| `linear` | `PviLinearRegression` | signal | Sanity lower bound. | Diagnostic |
-| `mlp` | `PviMLP` / `PviCore` | signal, impedance | Scaffold used to validate the core/readout + transfer wiring cheaply before scaling up. Not a production model — do not report scaffold numbers as final results (see §6.2, the checkpoint-export lesson). | Scaffold only |
-| `cnn` | `PviCNN` | signal, impedance | Local temporal-conv baseline / ablation point (how much does the recurrent/attention piece of `crt` actually buy). | Ablation |
-| `dnclstm` | `PviDenseNetConvLSTM` | image (40×40 EIT) | Paper-faithful 3D-DenseNet + Conv-LSTM + spatial bilinear readout — the most literal replication of Wang et al.'s actual core. Pairs with §3.4's learned-image track. High scientific fidelity, high cost/risk. | Stretch goal |
-| `samba` | `PviSamba` (WIP) | long raw sequences | SSM/Mamba for high-rate impedance. | Deprioritized (WIP, not required for the primary pillars) |
+| `crt` | `PviCNNTransformer` | impedance (BioZ, 64ch) | **Primary Core S** — conv + LSTM positional encoder + transformer. Best or near-best in every literature protocol (§10.1: PW15 AMAE 3.69, PD15 9.07); the most de-risked choice for the supervised core. | **Primary (co-)** |
+| `samba` | `PviSamba` | impedance (BioZ, 64ch) | **Primary, elevated** (was deprioritized as WIP; corrected per §3.5) — the CRS analog *wins* the subject-specific table outright (§10.1: `ss17` AMAE 4.09, best in any table) and matches CRT on PW/PD/longitudinal-robustness. Co-primary alongside `crt`, not a stretch goal. | **Primary (co-)** |
+| `mae` | `PviMaskedTransformer` | impedance, image patches | **Primary Core U** — tokenized MAE-style encoder, natural fit for the masked-reconstruction pretext. Per §3.5, this is where "bigger" should be spent — a large, data-hungry, label-free core, not a bigger Core S. | **Primary** |
+| `linear` | `PviLinearRegression` | signal, BioZ | Sanity lower bound *and* a useful diagnostic: per-subject (SS) linear models reach AMAE ~5.0 mmHg (§10.1, `ss03`) — evidence that within one subject the impedance→BP relationship is close to affine, supporting the §3.3 calibration hypothesis. | Diagnostic |
+| `mlp` | `PviMLP` / `PviCore` | signal, impedance | **Pipeline-validation scaffold only.** Used to test the core/readout/transfer wiring cheaply. Not a production model, not a benchmark — the small-MLP results in §10.3–10.6 describe plumbing tests, not model performance; do not compare them to §10.1 or use them to judge the approach. | Scaffold only — retired from benchmarking |
+| `cnn` | `PviCNN` | signal, impedance | Ablation point, and a cautionary one: §10.1 shows CNN is the *least stable* architecture in the entire literature sweep (SS AMAE 4.77–56.8 mmHg, no significant correlation with any diagnostic metric) — moderate capacity without recurrence/attention is not a safe default. | Ablation (do not use as a core) |
+| `dnclstm` | `PviDenseNetConvLSTM` | image (40×40 EIT) | Paper-faithful 3D-DenseNet + Conv-LSTM + spatial bilinear readout — the most literal replication of Wang et al.'s actual core. Pairs with §3.4's learned-image track (forward-operator feasibility now upgraded, still secondary given image≈BioZ accuracy per §10.1). | Stretch goal |
 
-**Why `crt`/`mae` and not a from-scratch architecture**: `crt` already has a directly
-comparable non-foundation reference point (PW15) in the same codebase family, which lets us
-cleanly attribute gains/losses to the foundation *paradigm* rather than to an unfamiliar
-architecture. `mae`'s token/patch structure is a natural match for the masked-reconstruction
-SSL pretext. Given the actual compute budget (§7.2), we are **not** running the full
-7-architecture × 2-core matrix in production — `crt` (Core S) and `mae` (Core U) are the
-production spine; `linear`/`mlp`/`cnn` stay as fast diagnostics and ablations;
-`dnclstm`/`samba` are stretch goals only if the primary pillars land with time/compute to
-spare.
+**Why `crt`/`samba` (Core S) and `mae` (Core U)**: `crt` and `samba`(CRS) are the two
+architectures with directly comparable literature reference points (§10.1) *and* the
+strongest cross-sectional + longitudinal robustness — this lets us cleanly attribute
+gains/losses to the foundation *paradigm* rather than to an unfamiliar or unstable
+architecture (see §3.5 for why CNN is excluded as a core candidate despite superficially
+competitive numbers). `mae`'s token/patch structure is the natural match for the
+masked-reconstruction SSL pretext, and per §3.5 is where scale should be invested. Given the
+actual compute budget (§7.2), we are **not** running the full architecture × 2-core matrix
+in production — `crt`/`samba` (Core S candidates) and `mae` (Core U) are the production
+spine; `linear` stays as a diagnostic; `cnn` and the small-`mlp` scaffold are explicitly
+*not* production candidates (the former for instability, the latter because it was never
+meant to be one); `dnclstm` is a stretch goal.
 
 ---
 
@@ -272,7 +380,7 @@ Primary pillars first (these carry the paper); secondary/exploratory tracks afte
 | **A** | Fig 2 | How fast does a **per-subject, trained-from-scratch** model learn, as a function of that subject's own data budget? | Individual models overfit badly at low budgets (already observed: cc_abs −0.12 @ 4 min) and only become competitive once given substantial per-subject data. | cc_abs, AMAE/RMSE, BHS/AAMI, vs. minutes of subject-specific data | Individual baseline only |
 | **B** | Fig 3b | Does **foundation transfer** beat training from scratch at low per-subject data budgets, and does the gap close as budget grows? Which calibration mechanism (§3.2: linear readout / MLP-or-partial-finetune / affine correction) wins, and at what budget? | Foundation transfer dominates at low budgets; the gap narrows as individual data grows (already suggested by AMAE converging by 64 min: 5.3 vs 6.0 mmHg); the shape/calibration decomposition (§3.3) explains *why*. | Same as A, run per calibration mechanism, per core (S/U), **with a matched-capacity random-init control** (§8.1) to isolate "pretraining helped" from "fewer free parameters survived low data" | Core S and/or U (pretrained); matched-capacity control model |
 | **C** | Fig 3c–g | Does a core/readout trained on **resting baseline only** generalize to physiologically distinct states (Valsalva, pressor) without retraining? | Foundation transfer generalizes across maneuvers meaningfully better than an individual model trained only on baseline, because the shared core captures maneuver-invariant structure. This is the least-explored, most novel claim we can make. | Same metrics, evaluated OOD (train baseline, test Valsalva/pressor) + within-maneuver and reverse-direction controls | Core S and/or U |
-| **G** | — | **Core U vs Core S** head-to-head: does self-supervised (label-free) pretraining match or beat supervised pretraining for downstream BP transfer and OOD generalization? | Open — Core U currently underperforms Core S, but the comparison so far used an unresolved scale/calibration bug (§6.3) and scaffold-only (MLP+signal) settings; needs to be re-run on production settings before concluding anything. | Same as B/C, both cores | Both cores at production settings |
+| **G** | — | **Core U vs Core S** head-to-head: does self-supervised (label-free) pretraining match or beat supervised pretraining for downstream BP transfer and OOD generalization? | Open — Core U currently underperforms Core S, but the comparison so far used an unresolved scale/calibration bug (§7.3) and scaffold-only (MLP+signal) settings; needs to be re-run on production settings before concluding anything. | Same as B/C, both cores | Both cores at production settings |
 
 ### Secondary / exploratory (kept, demoted — not load-bearing for the paper's core claims)
 
@@ -379,30 +487,125 @@ pillar landing successfully with compute to spare.
 3. ~~SSL dual pretext (masked + forecast) + multi-arch core factory (`crt`, `mae`, `cnn`,
    `mlp`).~~ **Done** (code); production-scale SSL pretrain **not yet completed** (§7.3
    blocks this).
-4. ~~Supervised cohort core S scaffold (MLP+signal).~~ **Done**; production (`crt`+impedance)
-   pretrain **in progress / stalled** (§7.2).
+4. ~~Supervised cohort core S scaffold (MLP+signal).~~ **Done, and retired** — per §3.5/§4,
+   this scaffold validated the pipeline only; it is not carried forward as a production
+   candidate or a benchmark (§10.3–10.6 relabeled accordingly).
 5. **Next**: resolve §7.1–7.4 (holdout wiring, compute-plan correction, Core U scale bug,
    SSL probe monitoring) — cheap, unblocks everything downstream.
-6. Production Core S (`crt`+impedance) and Core U (`mae`+impedance) pretrain to convergence,
-   exporting best (not last) checkpoint, evaluated once on `branch="holdout"`.
-7. Exp A/B (with the matched-capacity control, §8.1, and the 3 calibration mechanisms,
-   §3.2) across a real held-out cohort (≥10–20 subjects × ≥3 seeds), paired statistics.
+6. Production Core S candidates (`crt` **and** `samba`, both BioZ/impedance — §3.5, §4
+   elevates `samba` to co-primary) and Core U (`mae`, impedance) pretrain to convergence,
+   exporting best (not last) checkpoint, evaluated once on `branch="holdout"`. Prioritize
+   scaling Core U's pretraining data footprint/task diversity over Core S's parameter count
+   (§3.5 — the evidence argues against naive supervised-model scaling).
+7. Exp A/B (with the matched-capacity control, §8.1, the 3 calibration mechanisms §3.2, and
+   the shape/bias/label-gap diagnostics §3.3) across a real held-out cohort (≥10–20
+   subjects × ≥3 seeds), paired statistics.
 8. Exp C (OOD across maneuvers) — the second pillar.
 9. Exp G (Core U vs Core S) once both are at production scale and §7.3 is resolved.
-10. Shape/bias decomposition analysis (§3.3) applied retroactively to all of the above.
+10. Shape/bias/label-gap decomposition (§3.3) applied retroactively to all of the above.
 11. If time/compute remain: Exp D/E (interpretability, with the physiology-grounding
-    caveat from §5), Exp F / `dnclstm` (conditional on ring geometry, §3.4).
+    caveat from §5), Exp F / `dnclstm` (EIT forward-operator porting now more feasible per
+    §3.4's update, still secondary since image≈BioZ accuracy per §10.1).
+12. Once a core generalizes well (Exp B/C/G land): consider distillation into a smaller
+    deployable model (§3.5) — a deployment step, not a substitute for getting
+    generalization right first.
 
 ---
 
 ## 10. Empirical findings to date (evidence base)
 
-Preserved from the working run log — the concrete numbers behind the reasoning in §1–3 and
-§7. All results below are from `branch="main"` disjoint re-splits (not the dedicated
-holdout set — see §7.1), mostly on the **scaffold** MLP+signal configuration unless noted;
-treat as directional evidence for debugging/design, not final results.
+§10.1 is the **primary literature benchmark** — the source paper's own controlled
+architecture sweep, the strongest evidence we have. §10.2–10.6 are our own run history;
+per explicit direction, the small-MLP/`signal`-scaffold numbers in there are **pipeline
+validation only** (they tested that the core/readout/transfer wiring works end-to-end),
+**not benchmarks** — do not use them to judge the approach or compare them to §10.1.
 
-### 10.1 Reference: `pvi_ml` / `ml-experiments` (non-foundation, separate codebase)
+### 10.1 Primary literature benchmark: Wang-lab architecture sweep (this project's source paper)
+
+Five architectures (linear regression `LR`, `MLP`, `CNN`, hybrid conv+transformer `CRT`,
+hybrid conv+Samba `CRS`) × two inputs (`image`, `BioZ`) × two outputs (`waveform`,
+`fiducials`) × three partitioning protocols, N=91 subjects, ≈225h of data:
+
+- **SS (subject-specific)**: separate model per subject, metrics aggregated across all 91.
+- **PW (population-within)**: pooled training, tested on held-out *sequences* — but from
+  subjects also present in training (≈ our `split_mode="within"`/"local").
+- **PW→holdout**: the *same trained PW models*, evaluated on entirely unseen subjects — the
+  paper's actual generalization test.
+- **PD (population-disjoint)**: trained *and* tested with subjects held out from the start
+  (≈ our `split_mode="disjoint"`).
+
+**PW (in-distribution) — selected rows, full waveform output:**
+
+| ID | Arch | Input | AMAE | ARMSE | r²(agg) | r²(weighted) |
+|----|------|-------|------|-------|---------|---------------|
+| pw15 | CRT | BioZ | **3.69** | 4.00 | **0.85** | 0.61 |
+| pw19 | CRS | BioZ | 3.80 | 4.11 | 0.84 | 0.57 |
+| pw13 | CRT | image | 3.95 | 4.27 | 0.83 | 0.57 |
+| pw17 | CRS | image | 4.17 | 4.56 | 0.81 | 0.53 |
+| pw05 | MLP | image | 4.62 | 5.08 | 0.75 | 0.45 |
+| pw09 | CNN | image | 6.45 | 7.13 | 0.68 | 0.35 |
+| pw01 | LR | image | 11.23 | 11.73 | 0.11 | 0.05 |
+
+**PW→holdout (same trained models, unseen subjects) — same IDs:**
+
+| ID | Arch | Input | AMAE | ARMSE | r²(agg) | r²(weighted) | Δ vs. PW in-distribution |
+|----|------|-------|------|-------|---------|---------------|--------------------------|
+| pw15 | CRT | BioZ | **9.85** | 10.81 | **0.07** | 0.18 | AMAE +6.16, r² 0.85→0.07 (§1.1) |
+| pw19 | CRS | BioZ | 10.92 | 11.88 | 0.03 | 0.18 | |
+| pw13 | CRT | image | 11.04 | 11.88 | 0.04 | 0.10 | |
+| pw17 | CRS | image | 9.95 | 10.90 | 0.03 | 0.09 | |
+| pw01 | LR | image | 13.94 | 14.95 | 0.02 | 0.05 | |
+
+Every architecture and modality collapses on holdout; this is not a CRT-specific weakness.
+
+**PD (trained subject-disjoint from the start) — selected rows:**
+
+| ID | Arch | Input | AMAE | ARMSE | r²(agg) | r²(weighted) | Epochs |
+|----|------|-------|------|-------|---------|---------------|--------|
+| pd15 | CRT | BioZ | **9.07** | 9.76 | **0.32** | 0.19 | 65 |
+| pd19 | CRS | BioZ | 9.30 | 10.02 | 0.10 | 0.13 | 418 |
+| pd13 | CRT | image | 9.88 | 10.61 | 0.19 | 0.16 | 500 |
+| pd09 | CNN | image | 8.67 | 9.42 | 0.28 | 0.14 | 52 (early-stopped) |
+| pd01 | LR | image | 14.23 | 14.89 | 0.05 | 0.06 | 500 |
+
+Training *for* subject-disjointness from the start (PD) partially closes the gap vs.
+PW→holdout for the same architecture (pd15 AMAE 9.07 vs. pw15-on-holdout 9.85), but is
+still far below PW/SS in-distribution — a ceiling around AMAE≈9 mmHg / r²≈0.3 for
+population-disjoint protocols at this data volume, regardless of architecture (§3.5).
+
+**SS (subject-specific) — selected rows:**
+
+| ID | Arch | Input | AMAE | ARMSE | r²(agg) | r²(weighted) |
+|----|------|-------|------|-------|---------|---------------|
+| ss17 | CRS | image | **4.09** | 4.47 | 0.81 | **0.48** | ← best in any table |
+| ss19 | CRS | BioZ | 4.14 | 4.53 | 0.80 | 0.50 |
+| ss03 | LR | BioZ | 5.00 | 5.27 | 0.71 | 0.36 | ← §3.3: per-subject linear already competitive |
+| ss15 | CRT | BioZ | 5.12 | 5.47 | 0.76 | 0.63 |
+| ss13 | CRT | image | 6.02 | 6.33 | 0.71 | 0.65 |
+| ss09 | CNN | image | **28.85** | 29.27 | 0.37 | 0.56 | ← §3.3/§3.5: correlation looks fine, AMAE is broken |
+| ss11 | CNN | BioZ | 26.39 | 26.74 | 0.57 | 0.58 | ← same disconnect |
+
+**Ablation (Extended Data Table 3)**: compressing PW15 (CRT, 7.5M params) to 2.12M params
+*slightly improved* all metrics — extra depth was "redundant at this scale" (§3.5). CRT
+(7.5M) and CRS (~2.5M) land within noise of each other on every protocol above.
+
+**Robustness / longitudinal recalibration** (5 subjects, pilot study, progressive
+fine-tuning over 5 days): feedforward models degrade severely without recalibration —
+`SS03` (LR) ARMSE 12.3→33.51 mmHg (+21.21) over 5 days; hybrid transformer/Samba models are
+far more stable — `SS15` (CRT) 12.21→13.42 mmHg (+1.21) over the same period. Even after
+fine-tuning on the previous day's data, `SS03`/`SS07` (LR/MLP) fail to match `SS15`/`SS17`'s
+*un-recalibrated* day-3 performance. This is the direct evidence behind promoting `samba`
+to co-primary and excluding `cnn` as a core candidate (§3.5, §4).
+
+**Label gap** (the paper's own distribution-shift diagnostic, model-independent): PW
+holdout-set label gap ≈2.6x the typical PW train-test label gap; correlates with AMAE for
+LR/MLP (r 0.44–0.61). Adopted directly into our own methodology (§3.3).
+
+*(Full sweep: 20 PW + 20 PD + 20 SS model configs, all architecture/input/output
+combinations — this table shows the decision-relevant subset; the complete tables are
+preserved in the project's shared notes if a full reproduction is needed.)*
+
+### 10.2 Reference: `pvi_ml` / `ml-experiments` (our separate, non-foundation codebase)
 
 | Model | Split | Test cc_abs | Notes |
 |-------|-------|-------------|-------|
@@ -410,21 +613,21 @@ treat as directional evidence for debugging/design, not final results.
 | `abl-crtsin-bioz-to-waveform` (CRT) | `disjoint` (subject holdout) | ~0.46 peak, 0.21 final | The real motivating gap (§1.1). |
 | Longitudinal full-finetune, subject002 | within-subject, d00→d01 | 0.586 @ ep998 | Full fine-tune (not frozen core), from `ml-experiments/_long`; useful upper-bound reference for what "more calibration capacity" can reach. |
 
-### 10.2 Foundation scaffold (MLP + `signal`, 1-channel input) — pipeline-validation only
+### 10.3 Our foundation scaffold (MLP + `signal`, 1-channel input) — pipeline-validation only, not a benchmark
 
 | Job | Task | Result |
 |-----|------|--------|
 | 424458 | Core S pretrain, 500 ep, disjoint | Best test cc_abs **0.445 @ epoch 40**; **0.274 @ epoch 499** (0.17 Pearson lost by originally exporting the last epoch instead of best — bug now fixed, `export_core.py` tries best-checkpoint first automatically). |
 | 424459 | Core U SSL pretrain, 500 ep | Completed (~35 min); SSL loss → ~0; no BP signal monitored during training (§7.4). |
 
-### 10.3 Transfer to subject013 (frozen core, linear readout only, MLP scaffold)
+### 10.4 Our scaffold transfer to subject013 (frozen core, linear readout only, MLP scaffold) — pipeline-validation only
 
 | Core | Test cc_abs | Notes |
 |------|-------------|-------|
 | Core S | **0.336** | Flat from epoch 0 — consistent with a linear-only readout having little room to move a frozen core's output (§7.5). |
 | Core U | 0.305 | Peak ~epoch 449. |
 
-### 10.4 Exp B budget curve, subject013 (job 424512)
+### 10.5 Our scaffold Exp B budget curve, subject013 (job 424512) — pipeline-validation only
 
 **@ 4 min budget:**
 
@@ -446,9 +649,12 @@ Read together with §3.3: cc_abs saturates fast and stays roughly flat across th
 range for foundation_S; AMAE for individual closes most of the gap to foundation_S by 64
 min. This is the empirical basis for the shape-vs-calibration hypothesis in §3.3, and for
 requiring the matched-capacity control in §8.1 before concluding pretraining (rather than
-parameter count) explains the 4-min result.
+parameter count) explains the 4-min result. Despite being scaffold-only, this pattern
+(cc_abs saturating while AMAE tracks budget) is consistent with §10.1's decoupling of
+in-distribution shape-fitting from generalization/calibration — worth re-testing at
+production scale, not just discarding because the underlying models were scaffolds.
 
-### 10.5 Production runs — status as of 2026-07-01 (blocked by §7.2/§7.3)
+### 10.6 Our production runs — status as of 2026-07-01 (blocked by §7.2/§7.3)
 
 | Job | Component | Status |
 |-----|-----------|--------|
