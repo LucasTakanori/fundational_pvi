@@ -7,6 +7,317 @@ PERFORMANCE_DIAGNOSIS.md / RUNLOG.md, whose content is folded in below.*
 
 ---
 
+## 0. Execution runbook — start here
+
+**For an agent picking this up cold on the cluster.** Strict order; each step is tagged
+`[VERIFY]` (run a check, no changes), `[FIX]` (implement a code change), `[BUILD]` (build
+an artifact — cache, checkpoint), `[TRAIN]` (a real training job), or `[EXPERIMENT]` (run
+and record results). Steps within the same numbered phase that don't depend on each other
+can run in parallel; phases are sequential unless noted. Rationale for every step lives in
+the numbered sections below (§1–§13) — this section is commands and gates, not "why."
+**Read §1.3 and §3.3 before running any experiment** — they define what a result actually
+means here and prevent the two mistakes already made once in this project's history
+(comparing across split protocols, §1.1; trusting a correlation metric alone, §3.3/§7.3).
+
+### Phase 0 — Environment sanity `[VERIFY]`
+
+```bash
+cd /mmfs1/projects/ece_bst/lsanc68/fundational_pvi
+git pull origin main
+source env/cluster.env          # PVI_DATA_ROOT, PVI_CACHE_ROOT, PVIPROJECT_ROOT
+source .venv/bin/activate       # or: uv sync && source .venv/bin/activate (first time)
+python -m pytest tests/ -q
+```
+**Expect**: ~88 passed, 1 skipped (the GPU test skips without CUDA on the login node — fine;
+it will run for real inside any `sbatch` job). If anything else fails, stop and fix before
+proceeding — every step below assumes a green test suite.
+
+```bash
+python -c "from src.pipeline.data_discovery import PviDatasetInventory as I; \
+  print('main:', len(I(branch='main'))); print('holdout:', len(I(branch='holdout')))"
+```
+**Expect**: `main` ≈216, `holdout` ≈15 (5 subjects × up to 3 maneuvers). If `holdout` is 0,
+the dedicated holdout cohort isn't present on this machine — escalate to the user before
+proceeding with anything that depends on §7.1; everything else can still run.
+
+### Phase 1 — Fixes that must land before spending real compute
+
+1. `[VERIFY]` **Period-length consistency** (open item from the §7.7 audit — the whole
+   codebase assumes one `period_length` for the entire cohort; never independently checked
+   against real data):
+   ```bash
+   python -c "
+   from src.pipeline.data_discovery import PviDatasetInventory
+   from src.pipeline.data_extraction import PviRawDataset
+   inv = PviDatasetInventory(branch='main')
+   lengths = {f.name: PviRawDataset(f).load().period_length for f in inv}
+   print(sorted(set(lengths.values())))
+   "
+   ```
+   **Expect**: a single value (e.g. `[50]`). **If more than one value appears, STOP** —
+   `PviLazyDataset.period_length = self.raws[0].period_length` is applied globally to every
+   file's slicing (`data_preparation_lazy.py`), so a second value means some files are
+   being sliced with the wrong period boundary. This would need a real fix (per-file
+   period_length, not global) before any further training — escalate to the user, don't
+   patch around it silently.
+
+2. `[FIX]` **Thread subject identity into the training batch** (new prerequisite,
+   discovered while scoping the domain-adversarial item below — verified 2026-07-01:
+   neither `h5io.slice_sequences()` nor `PviParquetSplit.__getitem__` expose subject
+   identity per sample; `BasePviLearner.process_batch()` only ever reads
+   `bp`/`stats`/`pviHP`/`pviLP`). Needed for step 4 below (domain-adversarial training) and
+   generally useful for per-subject error breakdown. Concretely:
+   - `src/utils/h5io.py::slice_sequences()` — add a `subject_idx` (or `subject` string)
+     entry to the returned dict, sourced from the raw dataset's `subject` field (already
+     available as `PviRawDataset.subject`, matching `SequenceName` values `"subject001"`–
+     `"subject100"` from `src/utils/primitives.py::SubjectName`, a ready-made 1–100 index
+     space — use it rather than inventing a new encoding).
+   - `src/pipeline/pvi_cache.py::_sample_to_row()` — already writes `subject` into
+     `META_COLUMNS`, just not read back out. Add `"subject"` to the columns
+     `PviParquetSplit` formats/returns (currently hardcoded to `TENSOR_COLUMNS` only in
+     `pvi_parquet_dataset.py`) — needs a small dtype decision (string column doesn't
+     `set_format(type="torch")` cleanly; map to an integer index via `SubjectName` at read
+     time, or leave as string and encode in the training loop).
+   - `BasePviLearner.process_batch()` — do **not** silently start returning a 4th element;
+     that changes a signature used everywhere. Add a separate accessor (e.g.
+     `batch.get("subject_idx")`) that callers who need it (the GRL head) read directly from
+     the raw batch dict, not through `process_batch()`.
+   - Add a unit test with a synthetic batch asserting subject identity survives the
+     lazy-path and parquet-path round trip, matching this repo's existing testing pattern
+     (`tests/test_pvi_cache.py`, `tests/test_smoke.py`).
+
+3. `[FIX]` **RoPE replacing `RRPE`** (§3.7 Tier 1). Add `pe_type="rope"` as a third option
+   in `PviCNNTransformer`/`src/models/positional_encoder.py`, alongside the existing
+   `rrpe`/`sinusoidal`/`learnable`/`none` — do not remove `rrpe` (needed for ablation
+   against it, and it's the current default for backward compatibility with anything
+   already trained). `nn.TransformerEncoderLayer`'s built-in attention doesn't natively
+   support RoPE, so this needs a custom multi-head attention layer (rotate Q/K per head
+   before the dot product) or an existing well-tested implementation — do not hand-roll the
+   rotation math without a unit test that checks it reduces to standard attention at
+   position 0 and produces the expected relative-position property (rotating both Q and K
+   by the same absolute angle leaves their dot product depending only on the position
+   *difference*). Once built: `--crt-pe-type rope` end to end through
+   `model_factory.py`/`FoundationConfig`.
+
+4. `[FIX]` **Gradient-reversal subject-adversarial auxiliary head** (§3.7 Tier 1,
+   depends on step 2 above for real subject labels).
+   - `src/foundation/adversarial.py` (new): `GradientReversalFunction(torch.autograd.Function)`
+     — identity forward, negated-and-scaled gradient backward; `GradientReversalLayer(nn.Module)`
+     wrapping it with a settable `lambda_`; a `dann_lambda_schedule(progress: float, gamma=10.0)`
+     helper for the standard sigmoid ramp-up (`2/(1+exp(-gamma*progress)) - 1`) — start at
+     `lambda_=0` and ramp up over training, per the plan's own risk note (§3.7) that
+     un-ramped adversarial training can destabilize.
+   - `SubjectAdversaryHead(nn.Module)`: `GRL -> Linear(feature_size, num_subjects)`, wired
+     into any core via `model.add_aux_head("subject_adversary", module=SubjectAdversaryHead(...))`
+     (`BasePviLearner.add_aux_head` already accepts a pre-built `module=`, no core-side
+     changes needed — the aux-head API in `multitask.py` was already built for exactly this).
+   - Training-loop integration: after the main task loss backward, forward the same batch's
+     core features through the adversary head, compute cross-entropy against subject
+     labels (from step 2), backward — this adds one extra loss term, wire it into
+     `pretrain.py`/`ssl_pretrain.py` behind a `--subject-adversary` flag (default off, so
+     existing runs are unaffected) rather than making it unconditional.
+   - Test with synthetic multi-subject batches: (a) GRL is identity in forward pass
+     (`torch.allclose`), (b) gradient sign is flipped on the input side of the GRL, (c) the
+     lambda schedule is monotonic and bounded in `[0, 1)`.
+
+5. `[FIX]` **SSL linear-probe monitoring** (§7.4). Inside `ssl_pretrain.py`'s epoch loop,
+   every N epochs (flag `--probe-every`, default 10): freeze the current core, fit a cheap
+   linear readout on a small BP-labeled subset (a few subjects from `main`, held fixed
+   across the whole run so the probe score is comparable epoch to epoch — not the eventual
+   holdout set), report `cc_abs`/AMAE. This needs BP labels alongside the label-free SSL
+   cohort, so it requires a small labeled-subset loader distinct from the main SSL
+   `PviLazyDataset`/`PviParquetCohort` (reuse `build_subject_dataset` from `transfer.py` for
+   a handful of fixed subjects, cheap since it's a tiny fit each time — not a full transfer
+   run). Log `probe_cc_abs`/`probe_amae` alongside the existing `mask`/`forecast` losses so
+   a bad SSL run is visible during training, not discovered after the job completes.
+
+6. `[BUILD]` **The three Parquet cache variants** (§7.7 fix now unblocks this):
+   ```bash
+   python -m src.scripts.build_pvi_cache --input-mode impedance --branch main --split-mode disjoint \
+     --cache-root ${PVI_CACHE_ROOT}_main_disjoint
+   python -m src.scripts.build_pvi_cache --input-mode impedance --branch main --split-mode within \
+     --cache-root ${PVI_CACHE_ROOT}_main_within
+   python -m src.scripts.build_pvi_cache --input-mode impedance --branch holdout --split-mode disjoint \
+     --cache-root ${PVI_CACHE_ROOT}_holdout_disjoint
+   ```
+   `[VERIFY]` each:
+   ```bash
+   for v in main_disjoint main_within holdout_disjoint; do
+     python -m src.scripts.check_cache --cache-root ${PVI_CACHE_ROOT}_${v} --input-mode impedance
+   done
+   ```
+   **Expect**: `[check_cache] OK` for all three, with `train`/`test` counts printed — sanity
+   eyeball that `main_within`'s train+test roughly equals `main_disjoint`'s train+test (same
+   underlying pool, different partition), and `holdout_disjoint`'s counts are much smaller
+   (≈15 sessions vs. ≈216). If any cache is missing/invalid, re-run its `build_pvi_cache`
+   command with `--force`.
+
+7. `[FIX]` **Wire holdout evaluation discipline** — this is process, not code (the `branch`
+   config field already exists and works, §7.7). The rule: `--branch holdout` is invoked
+   **exactly once per experiment track**, only for the final reported number, never during
+   tuning/debugging. Log every holdout invocation (date, command, purpose) in §10.6-style
+   run-history notes appended to this plan, so it's auditable that holdout wasn't "peeked
+   at" repeatedly.
+
+### Phase 2 — Isolate the Core U scale/calibration bug (§7.3), before any production SSL job
+
+1. `[TRAIN]` Quick diagnostic SSL run (few epochs, not production-length):
+   ```bash
+   python -m src.foundation.ssl_pretrain --input-mode impedance --arch mae --max-epochs 5 \
+     --cache-root ${PVI_CACHE_ROOT}_main_disjoint --logdir debug-ssl-scale-check
+   ```
+2. `[TRAIN]` Transfer to one subject:
+   ```bash
+   python -m src.foundation.transfer --subject subject013 \
+     --core artifacts/debug-ssl-scale-check/main/foundation_core_U.pt --max-epochs 20
+   ```
+3. `[VERIFY]` Inspect **raw prediction scale**, not just aggregate metrics — write a short
+   script that loads the transferred model, runs one test batch, and prints
+   `predictions.min()/.max()/.mean()/.std()` next to `targets.min()/.max()/.mean()/.std()`.
+   True BP is ~40–200 mmHg. **If predictions are off by an order of magnitude or more**,
+   the bug is almost certainly one of: (a) a missing/incorrect denormalization step between
+   the SSL-pretrained core's feature scale and the readout, (b) the readout's initial
+   weights producing large-scale outputs that training never fully corrects (check the
+   loss curve — is it actually decreasing, or plateaued at a large value from step 1?), or
+   (c) an input-normalization mismatch between what the SSL pretext saw and what the
+   transfer/readout stage expects. Fix the specific mechanism found, then re-verify with
+   the same scale-inspection script before moving on — do not just declare it fixed because
+   `cc_abs` looks reasonable (§3.3's whole point: correlation can look fine while scale is
+   broken).
+
+### Phase 3 — Cheap external-checkpoint fine-tuning pass (§3.8), parallel to Phase 4/5
+
+Not competing for the same GPU-week budget as production pretraining — run these whenever
+convenient once Phase 1 lands.
+
+1. `[BUILD]`+`[EXPERIMENT]` **PITN** (highest priority): clone `github.com/Zest86/ACL-PITN`,
+   check specifically for a bioimpedance-trained checkpoint (vs. PPG/mmWave-only), build an
+   input-channel adapter if needed, fine-tune on our data, evaluate on PW/PD/holdout —
+   directly comparable to §10.1's benchmark table.
+2. `[BUILD]`+`[EXPERIMENT]` **HuBERT-ECG**: pull pretrained weights via Hugging Face
+   `AutoModel` (see `github.com/Edoar-do/HuBERT-ECG`), build a 64-channel-impedance input
+   adapter in front of the frozen pretrained transformer blocks, attach our BP readout,
+   fine-tune, evaluate. Doubles as a cheap pilot for whether discretized-SSL
+   representations from an adjacent domain transfer here (informs §3.6 before building our
+   own tokenizer).
+3. `[BUILD]`+`[EXPERIMENT]` **NormWear**: pull weights (`github.com/Mobile-Sensing-and-UbiComp-Laboratory/NormWear`),
+   exploit its documented variable-channel handling, fine-tune, evaluate.
+4. `[VERIFY]` **HiMAE**: confirm whether `himae_synth.ckpt` is a genuine large-scale
+   pretrained representation or a synthetic-data demo checkpoint before investing further
+   (`github.com/Simonlee711/HiMAE`) — only proceed to fine-tuning if it's the former.
+5. `[BUILD]`+`[TRAIN]`+`[EXPERIMENT]` **UTransBPNet**: no public code/weights — implement
+   from the paper description (SE-enhanced U-Net short-range extractor + transformer +
+   cross-attention long-range), train from scratch (fast now that Phase 1 step 6's caches
+   exist), evaluate on PW/PD/holdout, directly comparable to §10.1.
+6. `[VERIFY]` For every candidate above that reaches a real number: only promote to full
+   from-scratch treatment (§3.7 Tier 2/3) if it beats or meaningfully informs the §10.1
+   literature baseline for the equivalent architecture family/protocol — record the result
+   either way (a negative result here is still useful, §8.2 scope discipline).
+
+### Phase 4 — Production core pretraining
+
+Sequenced after Phase 1 (steps 3–4 land in the core architecture) and Phase 2 (Core U bug
+resolved) — do not spend a full production SSL job before Phase 2 closes.
+
+1. `[TRAIN]` **Core S — `crt`**, PW then PD:
+   ```bash
+   python -m src.foundation.pretrain --input-mode impedance --output-mode waveform --arch crt \
+     --branch main --split-mode within   --cache-root ${PVI_CACHE_ROOT}_main_within \
+     --batch-size 256 --eval-every 5 --logdir foundation-pretrain-crt-pw
+   python -m src.foundation.pretrain --input-mode impedance --output-mode waveform --arch crt \
+     --branch main --split-mode disjoint --cache-root ${PVI_CACHE_ROOT}_main_disjoint \
+     --batch-size 256 --eval-every 5 --logdir foundation-pretrain-crt-pd
+   ```
+2. `[TRAIN]` **Core S — `samba`** (co-primary per §3.5), same two commands with `--arch samba`
+   (verify the tag is registered in `model_factory.py` — `PviSamba` needs `mambapy`
+   installed on the compute node).
+3. `[TRAIN]` **Core U — `mae`**, SSL pretrain, PW then PD:
+   ```bash
+   python -m src.foundation.ssl_pretrain --input-mode impedance --arch mae --ssl-arch mae \
+     --branch main --split-mode within   --cache-root ${PVI_CACHE_ROOT}_main_within \
+     --batch-size 256 --logdir foundation-ssl-pretrain-mae-pw
+   python -m src.foundation.ssl_pretrain --input-mode impedance --arch mae --ssl-arch mae \
+     --branch main --split-mode disjoint --cache-root ${PVI_CACHE_ROOT}_main_disjoint \
+     --batch-size 256 --logdir foundation-ssl-pretrain-mae-pd
+   ```
+4. `[VERIFY]` For each of the 6 runs above: confirm `export_core_from_checkpoint` picked
+   the **best**, not last, checkpoint (`[pretrain]`/`[ssl] Saved ... core` log line —
+   already automatic per §7's earlier fix, just confirm it fired).
+5. `[EXPERIMENT]` Evaluate every core **once** on `branch=holdout` (Phase 1 step 7's
+   discipline) — this is the number that goes in §10, not the PW/PD test splits (those are
+   for iteration/tuning).
+6. **Expected result** (§10.1 is the calibration reference — a reproduction check, not yet
+   a novel claim): PW should approach the literature ceiling for the matching architecture
+   family (~0.85 r², ~3.7 mmHg AMAE, per PW15 CRT+BioZ). PD/holdout should land far lower
+   (~0.3 r², ~9 mmHg AMAE) — this gap is expected and matches §1.1's motivating evidence,
+   not a bug. **If PW numbers are dramatically worse than the literature reference, stop
+   and debug before proceeding to Phase 5** — it means something in the production
+   configuration (not just the foundation paradigm) is off, and every downstream experiment
+   would inherit the same problem silently.
+
+### Phase 5 — The paper's spine: Exp A/B/G
+
+Across a real held-out cohort, not the single subject013 used for early debugging (§7.6).
+
+1. `[EXPERIMENT]` Pick ≥10–20 held-out subjects (from the `holdout` branch first if it has
+   enough; supplement from `main`'s disjoint test pool if not, but flag which subjects came
+   from which pool in the results — do not silently mix "true holdout" and "in-run
+   disjoint" subjects without labeling them).
+2. `[EXPERIMENT]` For each subject × ≥3 seeds × the calibration mechanisms in §3.2 (frozen
+   linear / frozen-MLP-or-partial-finetune / affine-correction) × the matched-capacity
+   control (§8.1) × {individual, foundation_S, foundation_U}:
+   ```bash
+   python -m src.foundation.budget_exp --subject <subject> \
+     --core-s artifacts/foundation-pretrain-crt-pd/main/foundation_core.pt \
+     --core-u artifacts/foundation-ssl-pretrain-mae-pd/main/foundation_core_U.pt \
+     --arch crt --budgets-min 4,8,16,32,64 --seeds 0,1,2
+   ```
+   (extend `budget_exp.py` first to accept the calibration-mechanism and matched-capacity-
+   control flags per §3.2/§8.1 — not present in the current CLI, this is a `[FIX]`
+   prerequisite for this phase, not just a run.)
+3. `[EXPERIMENT]` Aggregate with `src/analysis/budget_curves.py` — mean±sem per method per
+   budget, paired across the same subjects.
+4. `[EXPERIMENT]` Apply the shape/bias/label-gap decomposition (§3.3) to every result —
+   this is required, not optional, given the demonstrated risk of correlation-looks-fine/
+   scale-is-broken (§3.3, §7.3, and the independent CNN confirmation in §10.1).
+5. `[EXPERIMENT]` Exp G: repeat with Core U in place of Core S, same subjects/seeds/budgets
+   — paired comparison, not a separate uncontrolled run.
+6. **Expected result / hypothesis being tested** (§3.3): foundation transfer beats
+   individual training at low calibration budgets; the gap narrows as budget grows (already
+   suggested directionally by the early subject013 numbers, §10.5, but n=1 there); the
+   *shape* term saturates fast and is largely explained by pretraining, while the
+   *calibration/bias* term stays subject-specific regardless of core quality — testable
+   directly via whether the affine-correction mechanism (§3.2 item 3) closes most of the
+   gap on its own. Either outcome (hypothesis holds, or bias errors are not
+   affine-explainable) is a reportable, useful result — see §3.3's "potential findings."
+
+### Phase 6 — OOD across maneuvers (Exp C), the second pillar
+
+1. `[FIX]` Build `ood_exp.py` (doesn't exist yet — `evaluate_ood` in
+   `src/foundation/evaluation.py` is implemented, but there's no driver script analogous to
+   `budget_exp.py` for this experiment).
+2. `[EXPERIMENT]` Train/calibrate on baseline-only data; evaluate on Valsalva and pressor
+   sessions for the same held-out subjects, plus within-maneuver and reverse-direction
+   controls (train on Valsalva, test on baseline — sanity check that the effect isn't just
+   "any mismatch hurts equally").
+3. **Expected result**: no literature number to calibrate against — this is the most novel,
+   least certain claim in the project. Hypothesis: the population-pretrained core
+   generalizes across physiological states better than an individual model trained only on
+   baseline. If it lands, it's the headline result; report honestly either way.
+
+### Phase 7 — Secondary/exploratory, only with compute/time to spare (§8.2 scope discipline)
+
+In priority order, not to be started before Phase 5/6 have real results: Core U variant 2
+(discretized SSL pretext, §3.6, gated on Phase 1 step 5's probe showing the baseline SSL
+core is worth extending) → Tier-2/3 architectures (TimesNet-style periodicity encoder,
+HiMAE-style multi-resolution SSL, any Phase-3 checkpoint promoted to full treatment) →
+Exp D/E (interpretability, with the physiology-grounding caveat in §5) → Exp F (learned
+EIT reconstruction, `dnclstm`) → distillation into a wearable-deployable model once a core
+has demonstrated real generalization (§3.5) — not before, since distillation transfers
+existing capability, it doesn't create it.
+
+---
+
 ## 1. Context and motivation
 
 ### 1.1 The problem we're actually solving
@@ -981,6 +1292,10 @@ production scale, not just discarding because the underlying models were scaffol
 ---
 
 ## 11. Operational playbook (how to actually run this)
+
+*§0 is the authoritative, strictly ordered execution sequence with prerequisites and
+expected results. This section is a quick-reference for individual commands once you know
+which step of §0 you're on — not a second ordering.*
 
 ### 11.1 Environment
 
