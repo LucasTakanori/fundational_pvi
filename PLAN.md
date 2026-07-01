@@ -279,19 +279,33 @@ F), not an accuracy claim — it remains secondary priority under §8.2's scope 
 
 The project's working hypothesis has shifted from validating pipeline scaffolds (small MLP
 cores, `signal` input — useful only for testing the core/readout/transfer wiring, see
-§4 and §10.3) toward training a substantially larger foundation core intended to learn
-population-level structure and, eventually, be distilled into something deployable. This
-section is about what "bigger" should concretely mean, because the evidence in §10.1
-argues against the naive version of that idea.
+§4 and §10.3) toward training a substantially larger foundation core, sized well beyond
+those scaffolds (they are debugging harnesses — `num_features=512`/6 layers for the MLP
+core, `d_model=64`/2 layers for the current `mae` config — not a serious capacity target),
+intended to generalize better and overfit less, so it can later be distilled into something
+small enough for a wearable. This section is about what "bigger" should concretely mean.
 
-**Against naive scaling.** The paper's own ablation study (Extended Data Table 3) found
-that compressing PW15 (CRT, 7.5M params) to 2.12M params via depth reduction *slightly
-improved* every metric — the authors' own conclusion was the extra depth was "redundant at
-this scale." CRT (7.5M) and CRS (~2.5M, a ~3x smaller Samba-based hybrid) land within noise
-of each other on every protocol (PW: 3.69 vs 3.80 AMAE; PD: 9.07 vs 9.30). **On this task,
+**Against naive scaling of the existing supervised recipe** (a narrower, more precise
+claim than "bigger doesn't help," see the correction below). The paper's own ablation study
+(Extended Data Table 3) found that compressing PW15 (CRT, 7.5M params) to 2.12M params via
+depth reduction *slightly improved* every metric — the authors' own conclusion was the
+extra depth was "redundant at this scale." CRT (7.5M) and CRS (~2.5M) land within noise of
+each other on every protocol (PW: 3.69 vs 3.80 AMAE; PD: 9.07 vs 9.30). **On this task,
 this data volume, trained the same single-task-supervised way, more capacity did not buy
-more generalization — it had already plateaued.** A bigger version of the same supervised
-recipe is not well-supported by the evidence as a fix for the §1.1 generalization problem.
+more generalization.**
+
+**Correction — this claim is narrower than it might read.** The paper's sweep covers five
+architecture *families* (LR, MLP, CNN, CRT, CRS), essentially two meaningfully different
+inductive biases (feedforward vs. conv+recurrence+attention hybrid), all trained the same
+way (single-task, BP-supervised). That's real evidence that *this specific recipe*
+plateaued — it is not evidence that capacity in general is useless, or that a
+fundamentally different architecture (richer attention — relative/rotary positional
+encoding, cross-session or cross-subject conditioning, hierarchical multi-scale temporal
+modeling over multiple cardiac cycles) or a different training methodology (self-supervised
+pretraining at scale, contrastive objectives across subjects) couldn't unlock headroom a
+5-architecture, single-methodology sweep never tested. Don't over-read "CRT plateaued" as
+"bigger models don't work here" — it specifically rules out one thing (inflating the
+existing supervised CRT/CRS recipe), not the broader design space.
 
 **What the evidence does support.** The paper's own diagnosis for *why* PW/PD models don't
 generalize is **data breadth**, not capacity: *"the limited generalizability of CRT models
@@ -300,40 +314,92 @@ from extending to out-of-distribution subjects"* — and they explicitly contras
 ~225h/91-subject dataset against industry datasets with "hundreds of thousands of
 individuals and millions of hours." We cannot get that much more data, but we can get more
 **effective** breadth per subject/session by not requiring every training example to carry
-a synchronized BP label — which is exactly what Core U (self-supervised, §3.1) is for.
-**A large core earns its capacity through a data-hungry, label-free pretraining objective
-that can draw on more of the available signal (all sessions, all maneuvers, not just the
-BP-labeled/synchronized subset) — not through inflating the existing single-task supervised
-CRT/CRS recipe.** Concretely: prioritize scaling Core U's pretraining data footprint and
-task diversity (multi-task pretext: masked reconstruction + forecasting + possibly
-contrastive/multi-session objectives) over scaling Core S's parameter count.
+a synchronized BP label — which is exactly what Core U (self-supervised, §3.1, and its
+tokenized variant, §3.6) is for. **A large core earns its capacity through a data-hungry,
+label-free pretraining objective that can draw on more of the available signal (all
+sessions, all maneuvers, not just the BP-labeled/synchronized subset) — not through
+inflating the existing single-task supervised CRT/CRS recipe.** Concretely: prioritize
+scaling Core U's pretraining data footprint, task diversity (masked reconstruction +
+forecasting + the discretized pretext in §3.6), and — separately from footprint —
+richer architectural components within Core U (attention variants, longer context,
+cross-session conditioning) over scaling Core S's parameter count on the existing recipe.
 
-**Inductive bias matters more than raw size.** The robustness analysis in §10.1 is telling
-on this point: CNN (moderate capacity, no recurrence/attention) is the *least* stable
-architecture in the entire sweep — SS AMAE ranging 4.77–56.8 mmHg with no significant
-correlation to any diagnostic metric (and directly visible in our own numbers: `ss09`/`ss11`
-show plausible r² alongside AMAE 26–29 mmHg — the same shape-vs-calibration disconnect as
-Core U, §3.3, §7.3, independently confirmed). CRT/CRS (recurrence + attention, matched to
-the cardiac-cycle-structured signal) are the stable, generalization-favoring choices, and
-this holds longitudinally too (§10.1: CRT degrades 1.21 mmHg over 5 days without
-recalibration vs. 21.21 mmHg for linear regression). **The scaling axis that has evidence
-behind it is temporal/structural (context length, attention depth, cross-session
-conditioning) within the CRT/CRS family — not raw width/depth of an architecture that's
-already shown to be capacity-saturated for the supervised task.**
+**Inductive bias matters more than raw size** *within the tested families*. The robustness
+analysis in §10.1 is telling on this point: CNN (moderate capacity, no
+recurrence/attention) is the *least* stable architecture in the entire sweep — SS AMAE
+ranging 4.77–56.8 mmHg with no significant correlation to any diagnostic metric (and
+directly visible in our own numbers: `ss09`/`ss11` show plausible r² alongside AMAE 26–29
+mmHg — the same shape-vs-calibration disconnect as Core U, §3.3, §7.3, independently
+confirmed). CRT/CRS (recurrence + attention, matched to the cardiac-cycle-structured
+signal) are the stable, generalization-favoring choices, and this holds longitudinally too
+(§10.1: CRT degrades 1.21 mmHg over 5 days without recalibration vs. 21.21 mmHg for linear
+regression). Given the correction above, treat this as "CRT/CRS-family inductive bias is a
+good, evidence-backed starting point," not "the ceiling of what architecture can achieve" —
+richer attention/context/conditioning built on top of that same family (not a return to
+CNN or feedforward) is the scaling axis with evidence behind it, alongside the
+self-supervised data-breadth argument.
 
-**Elevated priority: CRS/`samba`.** This also means `samba` (the CRS analog) should not be
-treated as a deprioritized WIP architecture (as an earlier version of this plan had it). In
-the paper's own sweep, CRS *wins* the subject-specific table outright (`ss17`: AMAE 4.09,
-the best number in any table) and is statistically indistinguishable from CRT everywhere
-else, including longitudinal robustness. It's promoted to co-primary alongside `crt` (§4).
+**Elevated priority: CRS/`samba`.** `samba` (the CRS analog) should not be treated as a
+deprioritized WIP architecture (as an earlier version of this plan had it). In the paper's
+own sweep, CRS *wins* the subject-specific table outright (`ss17`: AMAE 4.09, the best
+number in any table) and is statistically indistinguishable from CRT everywhere else,
+including longitudinal robustness. It's promoted to co-primary alongside `crt` (§4).
 
 **Distillation.** Distilling a large pretrained core into a smaller deployable model is a
 sound *deployment* step once the core has actually learned something a smaller model
 couldn't — but distillation transfers a teacher's existing knowledge, it does not create
 generalization the teacher didn't have. The generalization gain has to come from the
-data-breadth/self-supervision argument above, not from the distillation step itself, so
-Core U's pretraining quality (not the eventual student's size) is the thing to get right
-first.
+data-breadth/self-supervision/architecture arguments above, not from the distillation step
+itself, so Core U's pretraining quality (not the eventual student's size) is the thing to
+get right first.
+
+### 3.6 Discretized SSL pretext ("tokenizer") — a HuBERT/WavLM-style extension to Core U
+
+HuBERT and WavLM (self-supervised speech representation learning) train a masked-prediction
+objective against **discrete cluster-ID targets** (from k-means over features, iteratively
+refined) rather than continuous reconstruction targets; WavLM adds denoising/overlap
+augmentation and relative-position attention. This consistently outperforms continuous
+masked-reconstruction for downstream representation quality in the speech SSL literature,
+because classification over a discrete vocabulary is a more stable objective, and — the
+part most relevant here — it forces the model to discard nuisance variation (in speech:
+pitch, speaker identity, loudness) that a continuous MSE target is otherwise forced to fit
+exactly.
+
+**Why this is a good fit for our specific hypothesis, not just a borrowed trick**: the
+"nuisance variation" analogy maps directly onto §3.3's shape-vs-calibration decomposition.
+Subject-specific amplitude/baseline (the calibration nuisance) is exactly what a continuous
+MSE reconstruction target must fit precisely; a discrete classification target *can* be
+built to discard it. If the pretext clusters on normalized/whitened features (removing
+per-subject scale and offset before clustering), the resulting vocabulary becomes an
+operationalization of "subject-invariant morphological shape" — precisely what the shared
+core should learn, and something MSE reconstruction has no explicit pressure to isolate. It
+would also plausibly sidestep failure modes like the Core U AMAE=98 bug (§7.3): a
+classification loss over discrete bins is scale-invariant by construction, where MSE
+against raw units is exactly the kind of objective that produces silent scale/calibration
+mismatches.
+
+**Honest risks, not glossed over:**
+- Codebook/cluster training is genuinely more fragile than continuous MSE (dead clusters,
+  collapse, sensitivity to vocabulary size) — real engineering risk on top of what's
+  already running.
+- Speech has actual discrete underlying structure (phonemes) for clustering to latch onto;
+  it is *not* established that cardiac/impedance morphology has an analogous discrete
+  "alphabet" rather than a continuum driven by continuous physiological state (HR,
+  contractility, vascular tone). Forcing discretization onto continuous structure can lose
+  information rather than help — this is an empirical question to test, not assume.
+- Mitigation for the above: we already have a natural discretization axis in the data —
+  **cardiac-cycle phase** (`period_length=50`). Cluster jointly over (phase-bin, normalized
+  feature) rather than raw features, leaning on structure we already know exists rather
+  than hoping k-means discovers it from nothing.
+
+**Recommended sequencing**: this is **Core U, variant 2** — build and validate the baseline
+continuous-SSL Core U (`mae`, mask+forecast, §3.1) first, including the linear-probe
+monitoring from §7.4, before investing in this. Start with the simplest version (single
+round of offline k-means, phase-conditioned, added as a third loss term alongside the
+existing mask/forecast MSE terms — not a full replacement, and not the full iterative
+HuBERT re-clustering bootstrap) rather than the full pipeline. Evaluate it against the
+§3.3 shape/bias decomposition specifically — the falsifiable claim is that it moves the
+*shape* term more than continuous SSL does, not just that it moves aggregate cc_abs.
 
 ---
 
@@ -503,10 +569,14 @@ pillar landing successfully with compute to spare.
 8. Exp C (OOD across maneuvers) — the second pillar.
 9. Exp G (Core U vs Core S) once both are at production scale and §7.3 is resolved.
 10. Shape/bias/label-gap decomposition (§3.3) applied retroactively to all of the above.
-11. If time/compute remain: Exp D/E (interpretability, with the physiology-grounding
+11. **Core U, variant 2**: discretized/tokenized SSL pretext (§3.6) — only once the
+    baseline continuous-SSL Core U is validated (step 6 + §7.4's linear-probe monitoring
+    shows it's learning something useful). Evaluated specifically against whether it moves
+    the shape term of §3.3's decomposition more than continuous SSL does.
+12. If time/compute remain: Exp D/E (interpretability, with the physiology-grounding
     caveat from §5), Exp F / `dnclstm` (EIT forward-operator porting now more feasible per
     §3.4's update, still secondary since image≈BioZ accuracy per §10.1).
-12. Once a core generalizes well (Exp B/C/G land): consider distillation into a smaller
+13. Once a core generalizes well (Exp B/C/G land): consider distillation into a smaller
     deployable model (§3.5) — a deployment step, not a substitute for getting
     generalization right first.
 
