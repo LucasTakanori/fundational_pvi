@@ -392,6 +392,14 @@ mismatches.
   feature) rather than raw features, leaning on structure we already know exists rather
   than hoping k-means discovers it from nothing.
 
+**Update (2026-07-01), de-risking this**: **HuBERT-ECG** (Coppola et al.) already applies
+exactly this approach — discrete-target masked-prediction SSL — to 9.1M 12-lead ECGs,
+achieving AUROC 0.84–0.99 across 164 cardiac conditions when fine-tuned. ECG is a much
+closer analog to our signal (cardiac-cycle-structured biosignal) than generic speech was,
+so this is direct evidence the second risk bullet above is likely surmountable in this
+signal class, not just a hopeful analogy. Confidence in §3.6 raised accordingly; sequencing
+(Core U variant 2, after baseline SSL is validated) is unchanged.
+
 **Recommended sequencing**: this is **Core U, variant 2** — build and validate the baseline
 continuous-SSL Core U (`mae`, mask+forecast, §3.1) first, including the linear-probe
 monitoring from §7.4, before investing in this. Start with the simplest version (single
@@ -400,6 +408,170 @@ existing mask/forecast MSE terms — not a full replacement, and not the full it
 HuBERT re-clustering bootstrap) rather than the full pipeline. Evaluate it against the
 §3.3 shape/bias decomposition specifically — the falsifiable claim is that it moves the
 *shape* term more than continuous SSL does, not just that it moves aggregate cc_abs.
+
+### 3.7 Architecture exploration beyond CRT/CRS (literature review, 2026-07-01)
+
+Prompted by a direct, correct critique of `crt`: it stacks CNN → BiLSTM (via `RRPE`, our
+LSTM-based positional encoder) → Transformer — recurrence and self-attention both model
+sequential structure, so this is partly redundant, and modern sequence architectures have
+largely moved away from this exact pattern. Verified against current (2025–2026)
+literature rather than assumed. Ranked by confidence/cost so this doesn't become an
+unranked wishlist and undermine §8.2's scope discipline — most items here are *exploratory
+backlog*, not commitments; only the first tier is recommended to build soon.
+
+**Tier 1 — build soon (cheap, low-risk, directly evidenced):**
+- **Replace `RRPE` with RoPE (rotary position embedding)** in `crt`. Confirmed as the
+  current standard for relative positional information in high-performing transformers,
+  with proven length-extrapolation properties — a closed-form, non-recurrent alternative
+  that directly answers the critique above. Pure module swap; no new training paradigm, no
+  new data requirement, minimal implementation risk.
+- **Domain-adversarial subject-invariance**: a gradient-reversal layer (GRL) + subject-ID
+  classifier as an auxiliary head during core pretraining, explicitly penalizing the core
+  for encoding subject-identifiable information. Well-established for exactly this problem
+  in the cross-subject EEG/ECG literature (GRL: identity in the forward pass, negated
+  gradient in the backward pass — trivial to implement, and slots directly into the
+  existing aux-head machinery in `src/foundation/multitask.py`). **This is arguably the
+  highest-value item in this section**: unlike an architecture swap, it directly, explicitly
+  optimizes for the property §1.1 says we actually need (a subject-invariant core), rather
+  than hoping it falls out of scale or architecture choice alone — orthogonal to and
+  stackable with any core architecture (`crt`, `samba`, `mae`, or the Tier 2 options below).
+  Known risk: adversarial training can destabilize on nonstationary signals (documented in
+  the EEG domain-adaptation literature) — needs care (e.g. GRL weight warm-up), not a
+  reason to skip it.
+
+**Tier 2 — strong domain fit, moderate effort, explore once the primary Core S/U spine
+(§9) is running:**
+- **TimesNet-style periodicity-aware encoder**: replace the generic Conv1d/Conv3d frontend
+  with an explicit 1D→2D reshape aligned to `period_length=50` (period-index axis vs.
+  phase-within-period axis) and inception-style 2D conv blocks that separate intra-period
+  (single-heartbeat morphology) from inter-period (beat-to-beat/HRV-like) variation. More
+  principled than a generic CNN specifically *because* it's built around structure we
+  already know exists and already exploit for masking (`mask01/05/10/15`) — arguably the
+  best-motivated non-trivial architecture change found in this review.
+- **HiMAE** (hierarchical multi-resolution masked autoencoding for wearables, ICLR 2026):
+  produces multi-resolution embeddings rather than collapsing to one temporal scale,
+  directly matching our existing multi-scale mask convention. Notably reports
+  sub-millisecond on-device inference while beating scale-collapsing foundation models —
+  i.e., resolution-aware SSL is architecture-level evidence toward *both* better
+  representations and the distillation-for-wearables goal, not distillation as an
+  afterthought bolted onto a big model post hoc.
+
+**Tier 3 — exploratory/stretch:**
+- **PITN** (arXiv 2408.08488) — **update: code and pretrained weights are public**
+  (`github.com/Zest86/ACL-PITN`), moved to §3.8 below as a near-term fine-tuning
+  candidate rather than a from-scratch reimplementation.
+- **NormWear-style pure-attention encoder** (channel-tokens + shared CLS-pooling token,
+  no CNN at all) — an ablation direction for `mae`; lower priority since it tests a
+  similar broad hypothesis (pure attention, tokenized) to what `mae` already attempts.
+  Pretrained weights exist (§3.8) if a cheap trial is preferred over reimplementation.
+- **Pure-Mamba ablation of `samba`** (no sliding-window attention): ECG-specific SSM
+  precedent (ECGMamba, S2M2ECG — bidirectional Mamba for multi-beat ECG, reporting faster
+  inference at competitive accuracy) suggests this may be worth testing given the 1-GPU
+  budget (linear-time scaling vs. attention's quadratic cost).
+
+**Validates existing plan items, no new engineering needed:**
+- `microsoft/Samba` (ICLR 2025, "Mamba + MLP + Sliding Window Attention + MLP", stacked at
+  the layer level) is confirmed as the real published architecture `PviSamba` already
+  mirrors — direct validation that elevating it to co-primary (§3.5, §4) was well-founded,
+  not just a naming coincidence.
+- **FiLM** (Feature-wise Linear Modulation) is the established name for the affine-subject-
+  correction mechanism already proposed in §3.2/§3.3 — cite it properly rather than
+  reinventing informally. "Temporal FiLM" suggests a refinement if the simple global-affine
+  version proves insufficient: modulate per cardiac-phase rather than with one global
+  scale/offset per subject.
+
+### 3.8 Fine-tuning available pretrained checkpoints — a cheap first pass, before any
+from-scratch reimplementation
+
+Prompted by the reasonable instinct to just try several of §3.7's candidates rather than
+pick one on paper alone. That's expensive if it means reimplementing and pretraining each
+architecture from scratch — but several of them have **public code and pretrained
+weights**, which changes the cost completely: freeze the pretrained backbone, add a small
+trainable input adapter (to accept our channel count/modality) and our BP output head, and
+fine-tune only those on our data. This is cheap (hours, not GPU-days), doesn't compete
+meaningfully with the production Core S/U compute budget, and lets us test several
+architectures' suitability empirically before committing to reimplementing any of them.
+**This is the resolution to "try all of them": do this cheap pass broadly, then only
+promote to full from-scratch treatment (§3.7 Tier 2/3) whichever ones actually look good
+on our data.**
+
+Verified availability (2026-07-01), ranked by how directly usable each is:
+
+- **PITN** — highest priority. Public code *and* pretrained weights
+  (`github.com/Zest86/ACL-PITN`). Solves our exact task (cuffless BP) and was evaluated on
+  bioimpedance among its three modalities — check specifically whether a
+  bioimpedance-trained checkpoint is released separately; if so, this may need only a
+  channel-count adapter, not a full modality adapter, making it the cheapest and most
+  directly relevant of everything found. Also lets us test its adversarial-augmentation
+  and contrastive-BP-similarity components empirically instead of just reading about them.
+- **HuBERT-ECG** — public pretrained weights on Hugging Face (multiple model sizes).
+  Different modality (12-lead ECG voltage vs. our 64-channel impedance) so this needs a
+  real input adapter (swap the frontend, freeze the pretrained transformer blocks) — more
+  engineering than PITN, but still far cheaper than pretraining our own §3.6 tokenizer
+  from scratch, and this specific trial doubles as a cheap pilot for whether
+  discretized-SSL representations transfer into our domain at all before we build one
+  ourselves.
+- **NormWear** — public pretrained weights (GitHub releases / Hugging Face). Not
+  cardiac/BP-specific, but its architecture already handles variable channel counts (mean
+  pooling across channels before the shared backbone per its documentation), which is a
+  positive sign for adapting it to 64-channel impedance with comparatively little
+  engineering.
+- **HiMAE** — public checkpoint (`himae_synth.ckpt`), but the "synth" naming is
+  unconfirmed — verify whether this is a genuine large-scale pretrained representation or
+  a synthetic-data demo/validation checkpoint before relying on it; single-channel-oriented
+  (PPG/ECG), so also needs multi-channel handling similar to NormWear's approach.
+- **UTransBPNet** — **not pursued for now**: no public code or weights found anywhere
+  searched. Its own reported number (Pearson r≈0.61 for SBP, i.e. r²≈0.37) is not clearly
+  better than what we can already reproduce from the literature benchmark (§10.1: PD15
+  r²=0.32; PW15 r²=0.85 in-distribution), and it's unclear whether its "cross-scenario"
+  evaluation (drink/exercise/MIMIC) tests cross-**subject** generalization the way our
+  disjoint/holdout protocol does, or cross-**activity** within the same cohort — a
+  related but different claim. Adopting it would mean reimplementing a full U-Net+SE+
+  cross-attention architecture from the paper description alone with no pretrained
+  starting point and no confirmed benchmark advantage — exactly the expensive,
+  low-information path §8.2 exists to avoid. Revisit if the full paper (not yet read)
+  clarifies the evaluation protocol and the comparison looks more favorable.
+
+**Positioning note.** Foundation models for wearable physiological sensing exist
+(NormWear, HiMAE) but aren't BP-specific or evaluated as a population-pretrained
+core+readout transfer protocol. BP-specific architectures exist (UTransBPNet, PITN) but
+aren't framed or evaluated as true population-pretrained, cross-subject foundation models
+with a frozen-core+readout transfer protocol and rigorous held-out-subject evaluation. This
+project sits at the intersection of both — worth stating explicitly as a novelty argument,
+not just an engineering choice.
+
+Also worth naming for balance: current applied cuffless-BP literature still includes
+CNN+BiLSTM+attention designs (e.g. a 2025 PPG-BP paper). The critique that motivated this
+section is correct relative to general sequence-modeling SOTA (NLP/speech/generic time
+series), which has moved past stacking recurrence and attention — the applied wearable-BP
+subfield specifically hasn't fully caught up, which is itself an opportunity, not a sign
+the critique is overstated.
+
+**References** (read before implementing; not all were fully accessible during this
+review — verify details against the primary source):
+- HuBERT-ECG: https://www.medrxiv.org/content/10.1101/2024.11.14.24317328v3.full ,
+  code: https://github.com/Edoar-do/HuBERT-ECG
+- `microsoft/Samba`: https://arxiv.org/html/2406.07522v1 , code:
+  https://github.com/microsoft/Samba
+- RoPE / RoFormer: https://www.sciencedirect.com/science/article/abs/pii/S0925231223011864
+- TimesNet: https://arxiv.org/abs/2210.02186 (search result summary; verify against paper)
+- HiMAE: https://arxiv.org/abs/2510.25785 , code: https://github.com/Simonlee711/HiMAE
+- PITN: https://arxiv.org/abs/2408.08488 , code + pretrained weights:
+  https://github.com/Zest86/ACL-PITN (§3.8 — highest-priority fine-tuning candidate)
+- NormWear: https://arxiv.org/abs/2412.09758 , code + pretrained weights:
+  https://github.com/Mobile-Sensing-and-UbiComp-Laboratory/NormWear
+- HuBERT-ECG pretrained weights: via Hugging Face `AutoModel`, see
+  https://github.com/Edoar-do/HuBERT-ECG for loading instructions
+- ECGMamba / S2M2ECG: https://arxiv.org/html/2509.03066v1 (S2M2ECG; ECGMamba found via
+  search summary, verify independently)
+- FiLM: https://arxiv.org/pdf/1709.07871 (original paper); Temporal FiLM:
+  https://arxiv.org/pdf/1909.06628
+- Gradient reversal / domain-adversarial training: original DANN paper (Ganin & Lempitsky);
+  applied to biosignals per search summary, e.g.
+  https://www.ncbi.nlm.nih.gov/pmc/articles/PMC12899056/ (neonatal seizure detection,
+  representative example of the technique, not a direct precedent for BP)
+- UTransBPNet: https://www.nature.com/articles/s41598-025-02963-3 (no public code/weights
+  found; §3.8 explains why it's not pursued for now)
 
 ---
 
@@ -558,27 +730,45 @@ pillar landing successfully with compute to spare.
    candidate or a benchmark (§10.3–10.6 relabeled accordingly).
 5. **Next**: resolve §7.1–7.4 (holdout wiring, compute-plan correction, Core U scale bug,
    SSL probe monitoring) — cheap, unblocks everything downstream.
-6. Production Core S candidates (`crt` **and** `samba`, both BioZ/impedance — §3.5, §4
+6. **Tier-1 architecture updates (§3.7), before/alongside production pretraining**:
+   replace `RRPE` with RoPE in `crt`; add the gradient-reversal subject-adversarial
+   auxiliary head (available to any core). Both are cheap, low-risk, and should land before
+   the production pretrain runs so the primary cores already reflect them, rather than
+   being bolted on after the fact.
+7. **Cheap external-checkpoint fine-tuning pass (§3.8)**, run in parallel with steps 6/8,
+   not competing for the same GPU-week-scale budget: adapter-based fine-tune of PITN
+   (highest priority — public weights, same task, possibly same modality), HuBERT-ECG, and
+   NormWear on our data; verify HiMAE's checkpoint provenance before relying on it. Only
+   promote any of these to full from-scratch treatment (§3.7 Tier 2/3) if the cheap trial
+   actually looks good — this is how "try all of them" gets done without violating §8.2's
+   scope discipline.
+8. Production Core S candidates (`crt` **and** `samba`, both BioZ/impedance — §3.5, §4
    elevates `samba` to co-primary) and Core U (`mae`, impedance) pretrain to convergence,
    exporting best (not last) checkpoint, evaluated once on `branch="holdout"`. Prioritize
    scaling Core U's pretraining data footprint/task diversity over Core S's parameter count
    (§3.5 — the evidence argues against naive supervised-model scaling).
-7. Exp A/B (with the matched-capacity control, §8.1, the 3 calibration mechanisms §3.2, and
+9. Exp A/B (with the matched-capacity control, §8.1, the 3 calibration mechanisms §3.2, and
    the shape/bias/label-gap diagnostics §3.3) across a real held-out cohort (≥10–20
    subjects × ≥3 seeds), paired statistics.
-8. Exp C (OOD across maneuvers) — the second pillar.
-9. Exp G (Core U vs Core S) once both are at production scale and §7.3 is resolved.
-10. Shape/bias/label-gap decomposition (§3.3) applied retroactively to all of the above.
-11. **Core U, variant 2**: discretized/tokenized SSL pretext (§3.6) — only once the
-    baseline continuous-SSL Core U is validated (step 6 + §7.4's linear-probe monitoring
+10. Exp C (OOD across maneuvers) — the second pillar.
+11. Exp G (Core U vs Core S) once both are at production scale and §7.3 is resolved.
+12. Shape/bias/label-gap decomposition (§3.3) applied retroactively to all of the above.
+13. **Core U, variant 2**: discretized/tokenized SSL pretext (§3.6) — only once the
+    baseline continuous-SSL Core U is validated (step 8 + §7.4's linear-probe monitoring
     shows it's learning something useful). Evaluated specifically against whether it moves
     the shape term of §3.3's decomposition more than continuous SSL does.
-12. If time/compute remain: Exp D/E (interpretability, with the physiology-grounding
+14. **Tier-2/3 architecture exploration (§3.7)**, if the Tier-1-updated primary spine
+    (step 6/8) or the cheap fine-tuning pass (step 7) shows promise: TimesNet-style
+    periodicity-aware encoder, HiMAE-style multi-resolution SSL, and any promoted
+    checkpoint-fine-tune candidates given full from-scratch treatment. Not before the
+    primary pillars land; see §8.2 scope discipline.
+15. If time/compute remain: Exp D/E (interpretability, with the physiology-grounding
     caveat from §5), Exp F / `dnclstm` (EIT forward-operator porting now more feasible per
     §3.4's update, still secondary since image≈BioZ accuracy per §10.1).
-13. Once a core generalizes well (Exp B/C/G land): consider distillation into a smaller
+16. Once a core generalizes well (Exp B/C/G land): consider distillation into a smaller
     deployable model (§3.5) — a deployment step, not a substitute for getting
-    generalization right first.
+    generalization right first. HiMAE (§3.7) suggests resolution-aware SSL may partly
+    solve this by architecture rather than requiring a separate distillation pass.
 
 ---
 
