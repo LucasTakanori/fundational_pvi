@@ -12,6 +12,8 @@ PyYAML
 POT          # imported as `ot`
 tqdm
 matplotlib   # analysis plots (src/analysis/budget_curves.py); import is guarded
+datasets     # HF datasets, used by the parquet cache loader (src/pipeline/pvi_cache.py)
+pyarrow      # parquet read/write for the pvi cache
 
 # --- Dev / test ---
 pytest
