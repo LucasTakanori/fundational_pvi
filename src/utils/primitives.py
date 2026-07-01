@@ -59,6 +59,17 @@ def resolve_data_root(ds_root: str | Path | None = None) -> Path:
 SubjectName = Enum('SubjectName', {f'SUBJECT{k:03d}': f'subject{k:03d}' for k in range(1, 100 + 1)})
 SubjectName.keys = classmethod(lambda cls: [m.value for m in cls])
 
+NUM_SUBJECTS = 100
+
+
+def subject_name_to_idx(name: str) -> int:
+    """Map ``subject001``–``subject100`` to integer indices 1–100."""
+    key = str(name).lower()
+    for member in SubjectName:
+        if member.value == key:
+            return int(key.replace("subject", ""))
+    raise ValueError(f"Unknown subject name {name!r}; expected subject001–subject100.")
+
 class SessionName(Enum):
     BASELINE = "baseline"
     VALSALVA = "valsalva"

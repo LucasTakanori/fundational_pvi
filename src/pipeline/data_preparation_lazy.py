@@ -392,7 +392,8 @@ class PviLazyDataset(PviConfiguredDataset):
 
         sequence = h5io.slice_sequences(data=formatted_data,
                                         bounds=local_mask,
-                                        period_length=self.period_length)
+                                        period_length=self.period_length,
+                                        subject=ds_raw.subject)
         return sequence
 
     def _update_cache(self,

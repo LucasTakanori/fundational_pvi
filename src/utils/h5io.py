@@ -250,13 +250,18 @@ def format_tensors_stats(stats_dict: dict) -> torch.Tensor:
 
 def slice_sequences(data: dict[str,torch.Tensor],
                     bounds: tuple[int,...],
-                    period_length: int) -> dict[str, torch.Tensor]:
+                    period_length: int,
+                    subject: str | None = None) -> dict[str, torch.Tensor]:
     sl_period, sl_point = compute_tensor_slice(bounds, period_length)
 
     sequence = {'bp': data['bp'][sl_period][-1],
                 'stats': data['stats'][..., sl_period]}
 
     sequence.update({kw: data[kw][..., sl_point] for kw in PviChannelGroup.keys()})
+
+    if subject is not None:
+        from src.utils.primitives import subject_name_to_idx
+        sequence['subject_idx'] = torch.tensor(subject_name_to_idx(subject), dtype=torch.long)
 
     return sequence
 

@@ -158,10 +158,14 @@ def test_parquet_split_getitem(tmp_path):
         "stats": np.ones(10, dtype=np.float32).tolist(),
         "pviHP": np.zeros(250, dtype=np.float32).tolist(),
         "pviLP": np.ones(250, dtype=np.float32).tolist(),
+        "subject": "subject013",
+        "session": "baseline",
+        "source_name": "subject013_baseline",
     }
     hf = Dataset.from_list([row])
     split = PviParquetSplit(hf, tensor_shapes)
     sample = split[0]
-    assert set(sample.keys()) == set(TENSOR_COLUMNS)
+    assert set(sample.keys()) == set(TENSOR_COLUMNS) | {"subject_idx"}
     assert sample["bp"].shape == torch.Size([50])
     assert sample["pviHP"].shape == torch.Size([1, 250])
+    assert int(sample["subject_idx"]) == 13

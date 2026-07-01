@@ -59,7 +59,8 @@ def build_subject_dataset(cfg: FoundationConfig, subject: str, ds_root=None) -> 
     needs a within-subject train/test split, and the cache stores population
     disjoint splits where each subject lives entirely in train *or* test.
     """
-    inventory = PviDatasetInventory(branch="main", ds_root=ds_root)
+    branch = getattr(cfg, "branch", "main")
+    inventory = PviDatasetInventory(branch=branch, ds_root=ds_root)
     files = [f for f in inventory if f.subject == subject]
     if not files:
         available = sorted({f.subject for f in inventory})
@@ -106,6 +107,101 @@ def load_core_meta(core_path: str | Path) -> dict | None:
         return json.load(f)
 
 
+def transfer_checkpoints_dir(logdir: str,
+                             branch: str = "main",
+                             artifacts_root: str | Path | None = None) -> Path:
+    """``artifacts/{logdir}/{branch}/checkpoints`` from a transfer ``--logdir``."""
+    root = Path(artifacts_root or os.environ.get("PVIPROJECT_ROOT", Path.cwd()))
+    return root / "artifacts" / logdir / branch / "checkpoints"
+
+
+def resolve_transfer_checkpoint(transfer_logdir: str | None = None,
+                                checkpoint: str | Path | None = None,
+                                branch: str = "main",
+                                use_best: bool = True,
+                                artifacts_root: str | Path | None = None) -> Path:
+    """Resolve a transfer workflow checkpoint (.pth) from logdir or explicit path."""
+    from src.foundation.export_core import resolve_checkpoint
+
+    def _resolve_dir(ckpt_dir: Path) -> Path:
+        if use_best:
+            try:
+                return resolve_checkpoint(ckpt_dir, use_best=True)
+            except FileNotFoundError:
+                pass
+        return resolve_checkpoint(ckpt_dir, use_best=False)
+
+    if checkpoint is not None:
+        path = Path(checkpoint)
+        if path.is_dir():
+            return _resolve_dir(path)
+        if not path.is_file():
+            raise FileNotFoundError(f"Transfer checkpoint not found: {path}")
+        return path
+    if not transfer_logdir:
+        raise ValueError("Provide transfer_logdir or checkpoint.")
+    ckpt_dir = transfer_checkpoints_dir(
+        transfer_logdir, branch=branch, artifacts_root=artifacts_root,
+    )
+    return _resolve_dir(ckpt_dir)
+
+
+def load_transferred_model(subject: str,
+                           core_path: str | Path,
+                           cfg: FoundationConfig,
+                           ds_root=None,
+                           checkpoint: str | Path | None = None,
+                           transfer_logdir: str | None = None,
+                           branch: str | None = None,
+                           use_best_checkpoint: bool = True,
+                           artifacts_root: str | Path | None = None):
+    """Build subject model; optionally restore a trained readout from transfer ckpt."""
+    branch = branch or getattr(cfg, "branch", "main")
+    meta = load_core_meta(core_path)
+    if meta and meta.get("arch"):
+        cfg.arch = meta["arch"]
+        if meta.get("input_mode"):
+            cfg.input_mode = meta["input_mode"]
+        if meta.get("output_mode"):
+            cfg.output_mode = meta["output_mode"]
+
+    ds = build_subject_dataset(cfg, subject, ds_root=ds_root)
+    model = build_foundation_model(ds.shapes, cfg)
+    model.add_readout(subject)
+    model.set_active(subject)
+
+    if checkpoint or transfer_logdir:
+        ckpt_path = resolve_transfer_checkpoint(
+            transfer_logdir=transfer_logdir,
+            checkpoint=checkpoint,
+            branch=branch,
+            use_best=use_best_checkpoint,
+            artifacts_root=artifacts_root,
+        )
+        ckpt = torch.load(ckpt_path, map_location="cpu", weights_only=False)
+        if "model" not in ckpt:
+            raise KeyError(f"Checkpoint {ckpt_path} has no 'model' key.")
+        readout_key = f"readouts.{subject}"
+        if not any(k.startswith(readout_key) for k in ckpt["model"]):
+            raise KeyError(
+                f"No trained readout '{subject}' in {ckpt_path.name}. "
+                f"Available readouts: "
+                f"{sorted({k.split('.')[1] for k in ckpt['model'] if k.startswith('readouts.')})}"
+            )
+        model.load_state_dict(ckpt["model"], strict=False)
+        model.set_active(subject)
+        print(
+            f"[transfer] loaded trained readout from {ckpt_path} "
+            f"(epoch={ckpt.get('epoch', '?')})",
+            flush=True,
+        )
+    else:
+        state = torch.load(core_path, map_location="cpu")
+        model.load_core_state_dict(state, freeze=True)
+
+    return model, ds
+
+
 def main(subject: str,
          core_path,
          cfg: FoundationConfig = None,
@@ -126,7 +222,7 @@ def main(subject: str,
                 cfg.output_mode = meta["output_mode"]
     logdir = resolve_transfer_logdir(subject, core_path, core_tag=core_tag, logdir=logdir)
 
-    pm = ProjectPathManager(branch="main", target=logdir)
+    pm = ProjectPathManager(branch=cfg.branch, target=logdir)
     ds = build_subject_dataset(cfg, subject, ds_root=ds_root)
 
     model = build_foundation_model(ds.shapes, cfg)
@@ -171,6 +267,10 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument("--input-mode", default="signal")
     p.add_argument("--output-mode", default="waveform")
     p.add_argument("--mask-key", default="mask05")
+    p.add_argument("--branch", default="main",
+                   help="TrainingBranch for subject lookup: main|holdout (PLAN.md §7.1).")
+    p.add_argument("--readout-hidden", type=int, default=0,
+                   help="MLP readout hidden size (0=linear).")
     p.add_argument("--batch-size", type=int, default=32)
     p.add_argument("--min-epochs", type=int, default=1)
     p.add_argument("--max-epochs", type=int, default=500)
@@ -189,6 +289,8 @@ if __name__ == "__main__":
     cfg = FoundationConfig(input_mode=args.input_mode,
                            output_mode=args.output_mode,
                            mask_key=args.mask_key,
+                           branch=args.branch,
+                           readout_hidden=args.readout_hidden,
                            batch_size=args.batch_size,
                            min_epochs=args.min_epochs,
                            max_epochs=args.max_epochs)

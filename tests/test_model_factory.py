@@ -49,6 +49,15 @@ def test_foundation_crt_forward_and_transfer_readout():
     _train_readout_one_step(model, SHAPES_IMP)
 
 
+def test_foundation_crt_rope_forward():
+    cfg = FoundationConfig(arch="crt", input_mode="impedance", crt_pe_type="rope")
+    model = build_foundation_model(SHAPES_IMP, cfg)
+    assert model.arch == "crt"
+    model.set_active("shared")
+    seqs, stats, _ = model.process_batch(_batch(SHAPES_IMP))
+    assert model(seqs, stats).shape == (B, OUT)
+
+
 def test_foundation_mae_forward():
     cfg = FoundationConfig(arch="mae", input_mode="impedance")
     model = build_foundation_model(SHAPES_IMP, cfg)

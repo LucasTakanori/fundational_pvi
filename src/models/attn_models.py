@@ -6,6 +6,7 @@ from src.models.positional_encoder import (
     ResidualRecurrentPositionalEncoder as RRPE,
     SinusoidalPositionalEncoder,
     LearnablePositionalEncoder,
+    RoPETransformer,
 )
 
 
@@ -65,10 +66,19 @@ class PviCNNTransformer(BasePviLearner):
             return SinusoidalPositionalEncoder(d_model=self.projection_dim, max_len=5000)
         elif self.pe_type == "learnable":
             return LearnablePositionalEncoder(d_model=self.projection_dim, max_len=5000)
+        elif self.pe_type == "rope":
+            return nn.Identity()
         elif self.pe_type == "none":
             return nn.Identity()
         else:
             raise ValueError(f"Unknown pe_type: {self.pe_type}")
+
+    def _build_sequence_model(self, nheads: int) -> nn.Module:
+        if self.pe_type == "rope":
+            return RoPETransformer(
+                d_model=self.projection_dim, num_layers=2, num_heads=nheads, dim_mlp=512,
+            )
+        return Transformer(d_model=self.projection_dim, num_layers=2, num_heads=nheads, dim_mlp=512)
 
     def _make_layers(self) -> None:
         conv_layers = nn.ModuleList()
@@ -105,16 +115,20 @@ class PviCNNTransformer(BasePviLearner):
             # error case, should be already handled in the base class
             channel_size = None
 
-        # num_heads must divide d_model and be even
+        # num_heads must divide d_model, be even, and (for RoPE) yield an even head_dim.
         p = self.projection_dim
-        nheads = max([n for n in range(1, 10) if (not p % n) and (not n % 2)])
+        nheads = max([
+            n for n in range(1, 10)
+            if (not p % n) and (not n % 2)
+            and (self.pe_type != "rope" or ((p // n) % 2 == 0))
+        ])
 
         # Core = conv body + projection + positional encoder + transformer.
         self.core = nn.ModuleDict({
             "conv_layers": conv_layers,
             "projection": nn.Linear(channel_size, self.projection_dim),
             "pe": self._build_pe(),
-            "sequence_model": Transformer(d_model=self.projection_dim, num_layers=2, num_heads=nheads, dim_mlp=512),
+            "sequence_model": self._build_sequence_model(nheads),
         })
 
         self.feature_size = self.projection_dim * self.sequence_length

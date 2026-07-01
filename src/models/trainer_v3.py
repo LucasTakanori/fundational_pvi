@@ -147,10 +147,17 @@ class ModelTrainer(BaseModelHandler):
         self.use_amp = False
         self._scaler = None
 
+        self.subject_adversary_weight = 0.0
+        self.dann_lambda = 0.0
+
     def set_amp(self, enabled: bool = True) -> None:
         cuda = self.device is not None and getattr(self.device, "type", str(self.device)) == "cuda"
         self.use_amp = bool(enabled and cuda)
         self._scaler = torch.cuda.amp.GradScaler(enabled=self.use_amp)
+
+    def set_subject_adversary(self, weight: float = 0.0, lambda_: float = 0.0) -> None:
+        self.subject_adversary_weight = float(weight)
+        self.dann_lambda = float(lambda_)
 
     def train_epoch(self) -> dict[str, float]:
         """
@@ -204,6 +211,22 @@ class ModelTrainer(BaseModelHandler):
                                              max_norm=self.clip_grad_norm,
                                              norm_type=2.0)
                 self.optimizer.step()
+
+            if self.subject_adversary_weight > 0 and self.dann_lambda > 0:
+                from src.foundation.adversarial import (
+                    SUBJECT_ADVERSARY_HEAD,
+                    run_subject_adversary_step,
+                )
+                if SUBJECT_ADVERSARY_HEAD in self.model.aux_heads and "subject_idx" in batch:
+                    run_subject_adversary_step(
+                        self.model,
+                        batch,
+                        self.optimizer,
+                        lambda_=self.dann_lambda,
+                        weight=self.subject_adversary_weight,
+                        scaler=self._scaler,
+                        use_amp=self.use_amp,
+                    )
 
             pbar.set_postfix_str(s=f"loss={batch_loss:.2f}")
 

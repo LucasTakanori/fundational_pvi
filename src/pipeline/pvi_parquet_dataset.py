@@ -14,7 +14,7 @@ from src.pipeline.pvi_cache import (
     load_hf_dataset,
     load_manifest,
 )
-from src.utils.primitives import InputMode, OutputMode, SequenceMask
+from src.utils.primitives import InputMode, OutputMode, SequenceMask, subject_name_to_idx
 
 
 class PviParquetSplit(Dataset):
@@ -24,6 +24,12 @@ class PviParquetSplit(Dataset):
         self.hf = hf_split
         self.tensor_shapes = tensor_shapes
         self.hf.set_format(type="torch", columns=list(TENSOR_COLUMNS))
+        # Precompute once — per-row with_format(None) in __getitem__ was ~10x slower.
+        raw_subjects = hf_split.with_format(None)["subject"]
+        self._subject_ids = [
+            subject_name_to_idx(str(s.decode() if isinstance(s, bytes) else s))
+            for s in raw_subjects
+        ]
 
     def __len__(self) -> int:
         return len(self.hf)
@@ -38,6 +44,7 @@ class PviParquetSplit(Dataset):
             else:
                 tensor = tensor.to(dtype=torch.float32)
             out[key] = tensor.view(*shape)
+        out["subject_idx"] = torch.tensor(self._subject_ids[idx], dtype=torch.long)
         return out
 
 
@@ -100,6 +107,9 @@ class PviParquetCohort(PviConfiguredDataset):
 
         self.train_ds = PviParquetSplit(self._hf["train"], self.tensor_shapes)
         self.test_ds = PviParquetSplit(self._hf["test"], self.tensor_shapes)
+        for split_ds in (self.train_ds, self.test_ds):
+            for kw in self._VALID_CONFIGS_KEYS:
+                setattr(split_ds, kw, getattr(self, kw))
 
         n_train = len(self.train_ds)
         n_test = len(self.test_ds)

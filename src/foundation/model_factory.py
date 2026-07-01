@@ -34,6 +34,15 @@ def foundation_kwargs(cfg: FoundationConfig) -> dict:
             "num_layers": cfg.mae_num_layers,
             "mlp_depth_mae": cfg.mae_mlp_depth,
         })
+    elif arch == "samba":
+        kw.update({
+            "samba_projection_dim": cfg.samba_projection_dim,
+            "samba_mamba_layers": cfg.samba_mamba_layers,
+            "samba_samba_layers": cfg.samba_samba_layers,
+            "samba_cnn_depth": cfg.samba_cnn_depth,
+            "samba_mlp_depth": cfg.samba_mlp_depth,
+            "samba_pe_type": cfg.samba_pe_type,
+        })
     elif arch == "cnn":
         kw.update({
             "num_conv_layers": cfg.cnn_num_layers,

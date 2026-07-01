@@ -1,31 +1,15 @@
 #!/bin/bash
-#SBATCH --job-name=pvi-pytest
-#SBATCH --output=logs/pytest_%j.out
-#SBATCH --error=logs/pytest_%j.err
-#SBATCH --partition=ece_bst
-#SBATCH --account=ece_bst
-#SBATCH --nodes=1
-#SBATCH --ntasks=1
-#SBATCH --cpus-per-task=4
-#SBATCH --mem=32GB
-#SBATCH --time=00:30:00
-
+# Fast local test runner (no SLURM). Same focused targets as launch_test.sh.
 set -euo pipefail
 
 REPO_ROOT="/mmfs1/projects/ece_bst/lsanc68/fundational_pvi"
 cd "${REPO_ROOT}"
 
-# shellcheck source=/dev/null
 source "${REPO_ROOT}/env/cluster.env"
 source "${REPO_ROOT}/.venv/bin/activate"
-
 export PYTHONPATH="${REPO_ROOT}:${PYTHONPATH:-}"
 
-# Focused suite: fast CPU tests for Phase 1 fixes + foundation milestones.
-# Full suite: sbatch with TEST_TARGETS="tests/" or pytest tests/ -q
 TEST_TARGETS="${TEST_TARGETS:-tests/test_subject_batch.py tests/test_rope.py tests/test_adversarial.py tests/test_decomposition.py tests/test_pvi_cache.py tests/test_model_factory.py tests/test_smoke.py tests/test_milestone1.py tests/test_milestone3.py tests/test_mae_transformer.py tests/test_experiments.py}"
 
-echo "Running: pytest ${TEST_TARGETS} -q"
+echo "Running: pytest ${TEST_TARGETS} -q --tb=short"
 pytest ${TEST_TARGETS} -q --tb=short
-
-deactivate

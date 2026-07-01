@@ -12,6 +12,7 @@ from src.models.base_model import BasePviLearner
 from src.models.cnn_models import PviCNN
 from src.models.attn_models import PviCNNTransformer
 from src.models.mae_transformer import PviMaskedTransformer
+from src.models.s4_models import PviSamba
 from src.foundation.core import PviCore
 from src.foundation.readout import SubjectReadout
 from src.foundation.arch import normalize_arch
@@ -20,7 +21,7 @@ SHARED_READOUT = "shared"
 
 
 class PviFoundationModel(BasePviLearner):
-    SUPPORTED_ARCHES = frozenset({"mlp", "crt", "mae", "cnn"})
+    SUPPORTED_ARCHES = frozenset({"mlp", "crt", "mae", "cnn", "samba"})
 
     def __init__(self,
                  data_shapes: dict[str, tuple[int, ...]],
@@ -38,6 +39,13 @@ class PviFoundationModel(BasePviLearner):
                  cnn_depth: int = 2,
                  mlp_depth: int = 3,
                  pe_type: str = "rrpe",
+                 # samba
+                 samba_projection_dim: int = 100,
+                 samba_mamba_layers: int = 2,
+                 samba_samba_layers: int = 2,
+                 samba_cnn_depth: int = 1,
+                 samba_mlp_depth: int = 1,
+                 samba_pe_type: str = "rrpe",
                  # mae
                  d_model: int = 64,
                  num_layers: int = 2,
@@ -69,6 +77,14 @@ class PviFoundationModel(BasePviLearner):
             cnn_depth=cnn_depth,
             mlp_depth=mlp_depth,
             pe_type=pe_type,
+        )
+        self._samba_kwargs = dict(
+            projection_dim=samba_projection_dim,
+            mamba_layers=samba_mamba_layers,
+            samba_layers=samba_samba_layers,
+            cnn_depth=samba_cnn_depth,
+            mlp_depth=samba_mlp_depth,
+            pe_type=samba_pe_type,
         )
         self._mae_kwargs = dict(
             d_model=d_model,
@@ -124,6 +140,8 @@ class PviFoundationModel(BasePviLearner):
         shapes = self._data_shapes_dict()
         if self.arch == "crt":
             self._encoder = PviCNNTransformer(shapes, **self._crt_kwargs)
+        elif self.arch == "samba":
+            self._encoder = PviSamba(shapes, **self._samba_kwargs)
         elif self.arch == "mae":
             self._encoder = PviMaskedTransformer(
                 shapes, diff=self._diff, use_stats=self._use_stats,

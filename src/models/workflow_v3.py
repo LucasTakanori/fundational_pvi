@@ -74,6 +74,9 @@ class TrainingWorkflow:
         self._eval_every: int = 1
         self._last_test_metrics: dict = {}
 
+        self._subject_adversary_weight: float = 0.0
+        self._dann_gamma: float = 10.0
+
         self._paths: dict[ArtifactType, Path] = {}
         self._generate_save_paths()
 
@@ -117,6 +120,12 @@ class TrainingWorkflow:
 
             print("-"*15)
             print(header)
+
+            if self._subject_adversary_weight > 0:
+                from src.foundation.adversarial import dann_lambda_schedule
+                progress = self.epoch / max(self.max_epochs, 1)
+                lam = dann_lambda_schedule(progress, gamma=self._dann_gamma)
+                self.trainer.set_subject_adversary(self._subject_adversary_weight, lam)
 
             # compute train metrics in 'train mode'
             train_metrics = self.trainer.train_epoch()
@@ -210,6 +219,10 @@ class TrainingWorkflow:
 
     def set_eval_interval(self, epochs: int = 1) -> None:
         self._eval_every = max(1, int(epochs))
+
+    def configure_subject_adversary(self, weight: float, gamma: float = 10.0) -> None:
+        self._subject_adversary_weight = float(weight)
+        self._dann_gamma = float(gamma)
 
     def initiate_training(self,
                           use_checkpoint: bool=False,

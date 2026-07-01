@@ -23,6 +23,8 @@ from src.foundation.config import FoundationConfig
 from src.foundation.model_factory import build_ssl_model
 from src.foundation.ssl import PviSSLModel
 from src.foundation.pretrain import build_population_dataset
+from src.foundation.adversarial import attach_subject_adversary, dann_lambda_schedule, run_subject_adversary_step
+from src.foundation.ssl_probe import run_ssl_linear_probe
 
 
 def _log(msg: str) -> None:
@@ -51,13 +53,19 @@ def main(cfg: FoundationConfig = None,
     _log(f"[ssl] device={device}  amp={use_amp}  batch_size={cfg.batch_size}  "
          f"max_cache={cfg.max_cache}  stratified={cfg.stratified}")
 
-    pm = ProjectPathManager(branch="main", target=logdir)
+    pm = ProjectPathManager(branch=cfg.branch, target=logdir)
     _log("[ssl] building cohort dataset...")
     ds = build_population_dataset(cfg, ds_root=ds_root)
     _log(f"[ssl] train={len(ds.train_mask):,}  test={len(ds.test_mask):,}  "
          f"cluster_size={getattr(cfg, 'cluster_size', 'n/a')}")
 
     model = build_ssl_model(ds.shapes, cfg).to(device=device, dtype=DEFAULT_TRAIN_DTYPE)
+
+    if cfg.subject_adversary:
+        attach_subject_adversary(model)
+        _log(f"[ssl] subject-adversary head attached (weight={cfg.subject_adversary_weight})")
+
+    probe_subjects = [s.strip() for s in cfg.probe_subjects.split(",") if s.strip()]
 
     optimizer = optim.AdamW(model.parameters(), lr=cfg.lr, weight_decay=cfg.weight_decay)
 
@@ -81,6 +89,16 @@ def main(cfg: FoundationConfig = None,
             else:
                 losses["total"].backward()
                 optimizer.step()
+
+            if cfg.subject_adversary and "subject_idx" in batch:
+                progress = epoch / max(cfg.max_epochs, 1)
+                lam = dann_lambda_schedule(progress, gamma=cfg.dann_gamma)
+                run_subject_adversary_step(
+                    model, batch, optimizer, lambda_=lam,
+                    weight=cfg.subject_adversary_weight,
+                    scaler=scaler, use_amp=use_amp,
+                )
+
             for k in running:
                 running[k] += float(losses[k])
             pbar.set_postfix(total=f"{float(losses['total']):.4f}")
@@ -88,6 +106,13 @@ def main(cfg: FoundationConfig = None,
         if n_batches:
             msg = "  ".join(f"{k}={running[k] / n_batches:.4f}" for k in running)
             _log(f"[ssl] epoch {epoch:4d}/{cfg.max_epochs}  {msg}")
+
+        if cfg.probe_every > 0 and probe_subjects and epoch % cfg.probe_every == 0:
+            probe = run_ssl_linear_probe(
+                model, cfg, probe_subjects, device=device, ds_root=ds_root,
+            )
+            _log(f"[ssl] probe  cc_abs={probe['probe_cc_abs']:.4f}  "
+                 f"amae={probe['probe_amae']:.4f}  (n_subjects={probe.get('probe_subjects', len(probe_subjects))})")
 
         if getattr(ds, "clear_cache_every_epoch", False):
             ds.cleanup(attrs="cache", placeholder=None)
@@ -139,6 +164,13 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument("--ds-root", default=None)
     p.add_argument("--cache-root", default=None)
     p.add_argument("--cache-num-workers", type=int, default=None)
+    p.add_argument("--probe-every", type=int, default=10,
+                   help="Run frozen linear BP probe every N epochs (0=off).")
+    p.add_argument("--probe-subjects", default="subject001,subject013,subject020")
+    p.add_argument("--probe-epochs", type=int, default=5)
+    p.add_argument("--subject-adversary", action="store_true")
+    p.add_argument("--subject-adversary-weight", type=float, default=1.0)
+    p.add_argument("--dann-gamma", type=float, default=10.0)
     return p.parse_args()
 
 
@@ -166,7 +198,13 @@ if __name__ == "__main__":
                            cache_num_workers=cache_num_workers,
                            use_amp=not args.no_amp,
                            clear_cache_every_epoch=args.clear_cache_each_epoch,
-                           max_epochs=args.max_epochs)
+                           max_epochs=args.max_epochs,
+                           probe_every=args.probe_every,
+                           probe_subjects=args.probe_subjects,
+                           probe_epochs=args.probe_epochs,
+                           subject_adversary=args.subject_adversary,
+                           subject_adversary_weight=args.subject_adversary_weight,
+                           dann_gamma=args.dann_gamma)
     try:
         main(cfg, logdir=args.logdir, ds_root=args.ds_root)
     except FileNotFoundError as e:

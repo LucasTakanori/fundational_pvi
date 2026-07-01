@@ -196,6 +196,7 @@ def build_pvi_cache(cfg,
                 data=formatted,
                 bounds=bounds,
                 period_length=ds_raw.period_length,
+                subject=ds_raw.subject,
             )
             sample_np = {k: v.detach().cpu().numpy() for k, v in sample.items()}
             if tensor_shapes is None:
@@ -239,13 +240,20 @@ def build_pvi_cache(cfg,
 
 def load_hf_dataset(cache_root: str | Path):
     """Load cached Parquet splits with HuggingFace ``datasets``."""
+    import os
     from datasets import load_dataset
 
     root = Path(cache_root)
+    cache_dir = os.environ.get("HF_DATASETS_CACHE")
+    kwargs = {}
+    if cache_dir:
+        Path(cache_dir).mkdir(parents=True, exist_ok=True)
+        kwargs["cache_dir"] = cache_dir
     return load_dataset(
         "parquet",
         data_files={
             "train": str(root / "train" / "*.parquet"),
             "test": str(root / "test" / "*.parquet"),
         },
+        **kwargs,
     )

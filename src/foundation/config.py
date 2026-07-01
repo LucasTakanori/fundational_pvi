@@ -35,6 +35,13 @@ class FoundationConfig:
     crt_cnn_depth: int = 2
     crt_mlp_depth: int = 3
     crt_pe_type: str = "rrpe"
+    # samba (PviSamba)
+    samba_projection_dim: int = 100
+    samba_mamba_layers: int = 2
+    samba_samba_layers: int = 2
+    samba_cnn_depth: int = 1
+    samba_mlp_depth: int = 1
+    samba_pe_type: str = "rrpe"
     # mae (PviMaskedTransformer / MAE SSL encoder)
     mae_d_model: int = 64
     mae_num_layers: int = 2
@@ -69,3 +76,14 @@ class FoundationConfig:
     horizon: int = 10               # forecast window length (time steps)
     lambda_mask: float = 1.0        # weight on masked-reconstruction loss
     lambda_forecast: float = 1.0    # weight on forecasting loss
+
+    # --- subject adversary (DANN/GRL, Tier 1 §3.7) ---
+    subject_adversary: bool = False
+    subject_adversary_weight: float = 1.0
+    dann_gamma: float = 10.0
+
+    # --- SSL linear-probe monitoring (§7.4) ---
+    probe_every: int = 10
+    probe_subjects: str = "subject001,subject013,subject020"
+    probe_epochs: int = 5
+    probe_max_batches: int = 50

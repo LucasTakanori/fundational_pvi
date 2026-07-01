@@ -34,6 +34,7 @@ from src.foundation.config import FoundationConfig
 from src.foundation.export_core import export_core_from_checkpoint
 from src.foundation.model_factory import build_foundation_model
 from src.foundation.foundation_model import SHARED_READOUT
+from src.foundation.adversarial import attach_subject_adversary
 
 
 def dataloader_kwargs(cfg: FoundationConfig) -> dict:
@@ -122,12 +123,17 @@ def main(cfg: FoundationConfig = None,
          ds_root=None) -> TrainingWorkflow:
     cfg = cfg or FoundationConfig()
 
-    pm = ProjectPathManager(branch="main", target=logdir)
+    pm = ProjectPathManager(branch=cfg.branch, target=logdir)
     ds = build_population_dataset(cfg, ds_root=ds_root)
 
     # Pooled pretraining uses the single shared readout.
     model = build_foundation_model(ds.shapes, cfg)
     model.set_active(SHARED_READOUT)
+
+    if cfg.subject_adversary:
+        attach_subject_adversary(model)
+        print(f"[pretrain] subject-adversary head attached (weight={cfg.subject_adversary_weight})",
+              flush=True)
 
     loss_fn = MorphologyLoss(base_loss=nn.MSELoss(), base_weight=cfg.mse_weight)
     optimizer = optim.AdamW(model.parameters(), lr=cfg.lr, weight_decay=cfg.weight_decay)
@@ -143,6 +149,8 @@ def main(cfg: FoundationConfig = None,
                           stopper=stopper)
     wf.set_checkpoint_interval(minutes=120, epochs=10)
     wf.set_eval_interval(epochs=cfg.eval_every)
+    if cfg.subject_adversary:
+        wf.configure_subject_adversary(cfg.subject_adversary_weight, gamma=cfg.dann_gamma)
     wf.initiate_training(use_checkpoint=True,
                          device=DEFAULT_TRAIN_DEVICE,
                          dtype=DEFAULT_TRAIN_DTYPE,
@@ -204,6 +212,12 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument("--cache-root", default=None, help="Parquet cache directory (or set PVI_CACHE_ROOT).")
     p.add_argument("--cache-num-workers", type=int, default=None,
                    help="DataLoader workers when training from cache (default: config).")
+    p.add_argument("--crt-pe-type", default=None, dest="crt_pe_type",
+                   help="CRT positional encoding: rrpe|rope|sinusoidal|learnable|none.")
+    p.add_argument("--subject-adversary", action="store_true",
+                   help="Enable gradient-reversal subject-adversary auxiliary head.")
+    p.add_argument("--subject-adversary-weight", type=float, default=1.0)
+    p.add_argument("--dann-gamma", type=float, default=10.0)
     return p.parse_args()
 
 
@@ -228,7 +242,12 @@ if __name__ == "__main__":
                            use_amp=not args.no_amp,
                            clear_cache_every_epoch=args.clear_cache_each_epoch,
                            min_epochs=args.min_epochs,
-                           max_epochs=args.max_epochs)
+                           max_epochs=args.max_epochs,
+                           subject_adversary=args.subject_adversary,
+                           subject_adversary_weight=args.subject_adversary_weight,
+                           dann_gamma=args.dann_gamma)
+    if args.crt_pe_type is not None:
+        cfg.crt_pe_type = args.crt_pe_type
     try:
         main(cfg, logdir=args.logdir, ds_root=args.ds_root)
     except FileNotFoundError as e:
