@@ -130,7 +130,9 @@ Training artifacts (checkpoints, results, the saved core) are written under
 - `src/analysis/interpretability.py` (Exp D/E): in-silico input perturbation, gradient
   saliency, latent extraction (for UMAP), and the readout functional-barcode probe.
 
-See [`MODELS.md`](MODELS.md) for which architecture to use per experiment phase.
+See [`PLAN.md`](PLAN.md) (§4 Models, §5 Experiment matrix) for which architecture to use
+per experiment phase, the full experimental design, and the operational playbook for
+running everything on the cluster.
 
 `linear`, `mlp`, `cnn` (PviCNN), `crt` (PviCNNTransformer), `samba` (PviSamba, WIP),
 `mae` (PviMaskedTransformer — tokenized MAE-style encoder, candidate 2), and

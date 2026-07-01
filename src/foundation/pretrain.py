@@ -179,7 +179,7 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument("--input-mode", default="signal")
     p.add_argument("--output-mode", default="waveform")
     p.add_argument("--mask-key", default="mask05")
-    p.add_argument("--arch", default="mlp", help="Core architecture: mlp|crt|mae|cnn (see MODELS.md).")
+    p.add_argument("--arch", default="mlp", help="Core architecture: mlp|crt|mae|cnn (see PLAN.md §4).")
     p.add_argument("--num-features", type=int, default=512)
     p.add_argument("--num-hidden-layers", type=int, default=6)
     p.add_argument("--batch-size", type=int, default=512)

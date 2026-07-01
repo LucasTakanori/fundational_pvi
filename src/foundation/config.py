@@ -17,7 +17,7 @@ class FoundationConfig:
     cache_num_workers: int = 8        # DataLoader workers when training from cache
 
     # --- architecture ---
-    # `mlp` = scaffold; production: `crt` (Core S), `mae` (Core U). See MODELS.md.
+    # `mlp` = scaffold; production: `crt` (Core S), `mae` (Core U). See PLAN.md §4.
     arch: str = "mlp"
     ssl_arch: str | None = None       # SSL encoder; default mae when arch is production
     diff: int = 2
