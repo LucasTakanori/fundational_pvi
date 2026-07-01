@@ -10,7 +10,10 @@ import torch
 
 from src.foundation.config import FoundationConfig
 from src.pipeline.pvi_cache import (
+    META_COLUMNS,
     TENSOR_COLUMNS,
+    _flush_shard,
+    _sample_to_row,
     cache_is_valid,
     cache_key,
     manifest_matches,
@@ -108,6 +111,37 @@ def test_parquet_cohort_reports_true_mask_bucket(tmp_path):
     assert stats["num_seq10"] == ds.manifest["num_train"] + ds.manifest["num_test"]
     assert stats["num_seq05"] == 0
     assert stats["sqi"] is None  # not reconstructable from Parquet alone; must not fake 0.0
+
+
+def test_shard_stores_float32_not_float64(tmp_path):
+    """pa.Table.from_pylist() infers `double` from numpy .tolist() output (always
+    64-bit Python floats) even when the source array was cast to float32 -- silently
+    doubling storage/IO. _flush_shard must force a float32 schema so the cache is
+    faithful to (and no less efficient than) the intended dtype."""
+    sample = {
+        "bp": np.random.randn(50).astype(np.float64),  # source may arrive as float64
+        "stats": np.random.randn(2, 5).astype(np.float64),
+        "pviHP": np.random.randn(1, 250).astype(np.float64),
+        "pviLP": np.random.randn(1, 250).astype(np.float64),
+    }
+    meta = {"subject": "subj0", "session": "s1", "source_name": "file0"}
+    row = _sample_to_row(sample, meta)
+
+    out = tmp_path / "shard-00000.parquet"
+    _flush_shard([row], out)
+
+    table = pq.read_table(out)
+    for col in TENSOR_COLUMNS:
+        field_type = table.schema.field(col).type
+        assert field_type == pa.list_(pa.float32()), (
+            f"{col} stored as {field_type}, expected list<float32> (storage regression)"
+        )
+    for col in META_COLUMNS:
+        assert table.schema.field(col).type == pa.string()
+
+    # values still round-trip correctly (float32-precision-equivalent to the source)
+    stored_bp = np.array(table.column("bp")[0].as_py(), dtype=np.float32)
+    assert np.allclose(stored_bp, sample["bp"].astype(np.float32))
 
 
 def test_parquet_split_getitem(tmp_path):

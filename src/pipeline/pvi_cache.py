@@ -85,10 +85,21 @@ def _sample_to_row(sample: dict, meta: dict) -> dict:
     return row
 
 
+def _shard_schema() -> pa.Schema:
+    # Explicit float32 list type: pa.Table.from_pylist() infers `double` from Python
+    # floats produced by numpy .tolist() (always 64-bit), silently doubling storage/IO
+    # despite the upstream .astype(np.float32) cast (PLAN.md §7.7 addendum). Forcing the
+    # schema here restores the intended float32 footprint; values are unaffected either
+    # way (read back as float32 in PviParquetSplit regardless).
+    fields = [pa.field(k, pa.list_(pa.float32())) for k in TENSOR_COLUMNS]
+    fields += [pa.field(k, pa.string()) for k in META_COLUMNS]
+    return pa.schema(fields)
+
+
 def _flush_shard(rows: list[dict], out_path: Path) -> None:
     if not rows:
         return
-    table = pa.Table.from_pylist(rows)
+    table = pa.Table.from_pylist(rows, schema=_shard_schema())
     out_path.parent.mkdir(parents=True, exist_ok=True)
     pq.write_table(table, out_path, compression="zstd")
 
