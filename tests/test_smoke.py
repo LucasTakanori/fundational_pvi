@@ -105,6 +105,20 @@ def test_training_step_reduces_loss():
     assert losses[-1] < losses[0]  # overfits a fixed batch
 
 
+def test_infer_core_tag_and_logdir():
+    from src.foundation.transfer import infer_core_tag, resolve_transfer_logdir
+
+    assert infer_core_tag("artifacts/foundation-pretrain/main/foundation_core.pt") == "coreS"
+    assert infer_core_tag("artifacts/foundation-ssl-pretrain/main/foundation_core_U.pt") == "coreU"
+    assert infer_core_tag("foo.pt", core_tag="custom") == "custom"
+    assert resolve_transfer_logdir(
+        "subject013", "artifacts/foundation-pretrain/main/foundation_core.pt"
+    ) == "foundation-transfer-subject013-coreS"
+    assert resolve_transfer_logdir(
+        "subject013", "x.pt", logdir="my-run"
+    ) == "my-run"
+
+
 def test_transfer_trains_readout_only():
     model = _model()
     model.freeze_core()

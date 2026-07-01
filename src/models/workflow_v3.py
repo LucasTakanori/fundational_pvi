@@ -71,6 +71,8 @@ class TrainingWorkflow:
 
         self._checkpoint_interval: dict = {}
         self.set_checkpoint_interval(minutes=180, epochs=50)
+        self._eval_every: int = 1
+        self._last_test_metrics: dict = {}
 
         self._paths: dict[ArtifactType, Path] = {}
         self._generate_save_paths()
@@ -122,17 +124,25 @@ class TrainingWorkflow:
             train_loss = train_metrics['loss']
             train_accuracy = train_metrics['bp_accuracy']
 
-            # compute test metrics in 'test mode'
-            results = self.trainer.evaluate_epoch()
+            do_eval = (self.epoch % self._eval_every == 0) or (self.epoch == 1)
+            if do_eval:
+                results = self.trainer.evaluate_epoch()
+                test_metrics = self.trainer.compute_tracking_metrics(*results)
+                self._last_test_metrics = test_metrics
+            else:
+                test_metrics = self._last_test_metrics or {
+                    'loss': train_loss,
+                    'bp_accuracy': train_accuracy,
+                }
 
-            test_metrics = self.trainer.compute_tracking_metrics(*results)
             test_loss = test_metrics['loss']
             test_accuracy = test_metrics['bp_accuracy']
 
-            print(f"\t Epoch Loss (Train|Test): {train_loss:.4f}|{test_loss:.4f}")
-            print(f"\t Epoch Accuracy (Train|Test): {train_accuracy:.4f}|{test_accuracy:.4f}")
+            eval_tag = "" if do_eval else " (test metrics cached)"
+            print(f"\t Epoch Loss (Train|Test): {train_loss:.4f}|{test_loss:.4f}{eval_tag}")
+            print(f"\t Epoch Accuracy (Train|Test): {train_accuracy:.4f}|{test_accuracy:.4f}{eval_tag}")
 
-            if self.scheduler and self.epoch >= min_epochs:
+            if self.scheduler and self.epoch >= min_epochs and do_eval:
                 if isinstance(self.scheduler, optim.lr_scheduler.ReduceLROnPlateau):
                     self.scheduler.step(test_loss)
                 else:
@@ -151,14 +161,14 @@ class TrainingWorkflow:
 
             self.tracker.add_epoch(self.epoch, tracking_metrics)
 
-            if self.stopper and self.epoch >= min_epochs:
+            if self.stopper and self.epoch >= min_epochs and do_eval:
                 self.stopper.step(self.epoch, test_accuracy)
 
             self._checkpoint_if_needed()
 
-            # only valid for lazy dataset
-            self.dataset.cleanup(attrs="cache", placeholder=None)
-            gc.collect()
+            if getattr(self.dataset, "clear_cache_every_epoch", False):
+                self.dataset.cleanup(attrs="cache", placeholder=None)
+                gc.collect()
 
         self.terminate_training()
 
@@ -198,10 +208,14 @@ class TrainingWorkflow:
 
         self._checkpoint_interval = {'minutes': minutes, 'epochs': epochs}
 
+    def set_eval_interval(self, epochs: int = 1) -> None:
+        self._eval_every = max(1, int(epochs))
+
     def initiate_training(self,
                           use_checkpoint: bool=False,
                           device: torch.device=None,
-                          dtype: torch.dtype=None) -> None:
+                          dtype: torch.dtype=None,
+                          use_amp: bool = False) -> None:
 
         if self.path_manager.logdir is None:
             raise RuntimeError(f"{self._alias}: Logging dir not set! Cannot start training.")
@@ -253,6 +267,7 @@ class TrainingWorkflow:
         self.device = self.device if device is None else device
         self.dtype = self.dtype if dtype is None else dtype
         self.trainer = self.trainer.to(device=self.device, dtype=self.dtype)
+        self.trainer.set_amp(use_amp)
         self.trainer.transfer_optimizer(device=self.device, dtype=self.dtype)
 
         if self.status=='initial':
@@ -329,6 +344,7 @@ class TrainingWorkflow:
             evaluator = ModelEvaluator(
                     dataset=self.trainer.dataset,
                     model=self.trainer.model)
+            evaluator.to(device=self.trainer.device, dtype=self.trainer.dtype)
 
             if 'test' in evaluator.eval_results:
                 _ = evaluator.eval_results['test']

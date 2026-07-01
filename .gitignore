@@ -5,6 +5,7 @@ __pycache__/
 .eggs/
 build/
 dist/
+.pytest_cache/
 
 # Virtual environments
 .venv/
@@ -17,12 +18,31 @@ env/
 *:Zone.Identifier
 .DS_Store
 
-# Training outputs / data
+# Training outputs
 artifacts/
 *.ckpt
 *.pt
 *.pth
+
+# Parquet / HF cache (built on scratch; never commit)
+pvi_cache/
+
+# Local datasets (cluster data lives under PVI_DATA_ROOT)
 data/
 
 # Keep the bundled sample file used by the smoke test
 !src/utils/test.h5
+
+# SLURM / cluster job logs (written to repo root by launch_*.sh)
+foundation-*.out
+foundation-*.err
+build-pvi-cache*.out
+build-pvi-cache*.err
+exp-b-*.out
+exp-b-*.err
+pytest_*.out
+pytest_*.err
+
+# Catch-all for other sbatch logs: <job-name>_<jobid>.out|.err
+*_*.out
+*_*.err

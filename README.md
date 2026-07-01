@@ -34,13 +34,45 @@ legacy_matlab/           # original MATLAB analysis scripts (not used by Python)
 
 ## Install
 
+With [uv](https://docs.astral.sh/uv/) (recommended on the cluster):
+
+```bash
+cd /mmfs1/projects/ece_bst/lsanc68/fundational_pvi
+uv sync          # creates .venv/ and installs deps (CUDA 12.1 torch via pyproject.toml)
+source .venv/bin/activate
+```
+
+Or with pip:
+
 ```bash
 pip install -r requirements.txt
 ```
 
-A CPU build of torch is enough for the smoke test; install a CUDA build for real
-training. `geomloss` and `mambapy` are optional (only `quality_evaluator.py` and
-the WIP `s4_models.py` need them — their imports are guarded).
+A CPU build of torch is enough for the smoke test; the `pyproject.toml` pins a
+CUDA 12.1 PyTorch wheel for GPU training. Change `[tool.uv]` if your node's
+driver needs a different CUDA build.
+
+## Cluster jobs
+
+Paths for this project live in `env/cluster.env`:
+
+```bash
+export PVIPROJECT_ROOT=/mmfs1/projects/ece_bst/lsanc68/fundational_pvi   # artifacts
+export PVI_DATA_ROOT=/home/lsanc68/ece_bst_link/common/data/pvi_data      # …/main/*.h5
+```
+
+Submit a GPU job (1 GPU, 16 CPUs, 250 GB RAM, 10 days):
+
+```bash
+sbatch src/launch.sh       # core S (supervised cohort pretrain)
+sbatch src/launch_ssl.sh   # core U (SSL pretrain)
+```
+
+Override the command:
+
+```bash
+JOB_SCRIPT="python -m src.foundation.ssl_pretrain --max-epochs 50" sbatch src/launch.sh
+```
 
 ## Running
 
@@ -63,14 +95,17 @@ python -m src.foundation.transfer --subject subject013 \
 
 ## Data
 
-Datasets are discovered under `$PVIPROJECT_ROOT/datasets/main/` (defaulting to
-`./data/datasets/main/` when the env var is unset), as `{subject}_{session}_masked.h5`
-HDF5 files. **The recordings are not included in this repo** — only an empty
-placeholder `src/utils/test.h5`. Point `PVIPROJECT_ROOT` (or `--ds-root`) at your
-data before pretraining:
+Datasets are discovered under `$PVI_DATA_ROOT/main/` (see `env/cluster.env`),
+`$PVIPROJECT_ROOT/datasets/main/`, or `./data/datasets/main/` when unset, as
+`{subject}_{session}_masked.h5` HDF5 files. **The recordings are not included in
+this repo** — only an empty placeholder `src/utils/test.h5`. Set `PVI_DATA_ROOT`
+(or `PVIPROJECT_ROOT` / `--ds-root`) before pretraining:
 
 ```bash
-export PVIPROJECT_ROOT=/path/to/PviProject
+source env/cluster.env
+# or:
+export PVI_DATA_ROOT=/home/lsanc68/ece_bst_link/common/data/pvi_data
+export PVIPROJECT_ROOT=/mmfs1/projects/ece_bst/lsanc68/fundational_pvi
 ```
 
 Training artifacts (checkpoints, results, the saved core) are written under
@@ -95,7 +130,7 @@ Training artifacts (checkpoints, results, the saved core) are written under
 - `src/analysis/interpretability.py` (Exp D/E): in-silico input perturbation, gradient
   saliency, latent extraction (for UMAP), and the readout functional-barcode probe.
 
-### Architectures (all under the core/readout contract, selectable via `_model_mapper`)
+See [`MODELS.md`](MODELS.md) for which architecture to use per experiment phase.
 
 `linear`, `mlp`, `cnn` (PviCNN), `crt` (PviCNNTransformer), `samba` (PviSamba, WIP),
 `mae` (PviMaskedTransformer — tokenized MAE-style encoder, candidate 2), and

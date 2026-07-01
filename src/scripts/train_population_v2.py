@@ -23,9 +23,6 @@ def main(target_model: type(BasePviLearner),
 
     pm = ProjectPathManager(branch='main', target=logdir)
 
-    # Dataset location resolves from (in order): the `ds_root` argument, the
-    # PVIPROJECT_ROOT env var (via ProjectRoot), or a repo-relative ./data/datasets.
-    ds_root = Path(ds_root) if ds_root is not None else ProjectRoot()() / "datasets"
     ds_list = PviDatasetInventory(ds_root=ds_root, branch='main')
 
     ds_lazy = PviLazyDataset(ds_files=ds_list,

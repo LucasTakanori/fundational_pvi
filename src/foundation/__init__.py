@@ -26,6 +26,11 @@ from src.foundation.multitask import (
 )
 from src.foundation.evaluation import collect_predictions, evaluate, evaluate_ood
 from src.foundation.experiments import train_model, run_budget_curve
+from src.foundation.model_factory import (
+    build_foundation_model, build_ssl_model,
+    default_supervised_config, default_ssl_config,
+)
+from src.foundation.arch import normalize_arch
 
 __all__ = [
     "FoundationConfig",
@@ -44,4 +49,9 @@ __all__ = [
     "evaluate_ood",
     "train_model",
     "run_budget_curve",
+    "build_foundation_model",
+    "build_ssl_model",
+    "default_supervised_config",
+    "default_ssl_config",
+    "normalize_arch",
 ]

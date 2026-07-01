@@ -40,6 +40,22 @@ class ProjectRoot:
     def __call__(self) -> Path:
         return self.root
 
+
+def resolve_data_root(ds_root: str | Path | None = None) -> Path:
+    """Parent directory of dataset branch folders (main/, longitudinal/, …).
+
+    Resolution order:
+      1. explicit `ds_root` argument
+      2. PVI_DATA_ROOT environment variable (cluster layout: …/pvi_data/main/)
+      3. $PVIPROJECT_ROOT/datasets (legacy layout)
+      4. <repo>/data/datasets (local placeholder)
+    """
+    if ds_root is not None:
+        return Path(ds_root)
+    if "PVI_DATA_ROOT" in os.environ:
+        return Path(os.environ["PVI_DATA_ROOT"])
+    return ProjectRoot().root / "datasets"
+
 SubjectName = Enum('SubjectName', {f'SUBJECT{k:03d}': f'subject{k:03d}' for k in range(1, 100 + 1)})
 SubjectName.keys = classmethod(lambda cls: [m.value for m in cls])
 

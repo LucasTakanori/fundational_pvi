@@ -1,0 +1,65 @@
+[build-system]
+requires = ["setuptools>=64", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pviml"
+version = "0.1.2"
+description = "PVI -> blood-pressure ML pipeline + core/readout foundation model"
+readme = "src/README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "torch",
+    "numpy",
+    "scipy",
+    "scikit-learn",
+    "pandas",
+    "h5py",
+    "PyYAML",
+    "POT",       # imported as `ot`
+    "tqdm",
+    "matplotlib",
+    "datasets",
+    "pyarrow",
+]
+
+[project.optional-dependencies]
+dev = ["pytest"]
+# Optional model backends (guarded imports):
+#   geomloss  -> src/models/quality_evaluator.py
+#   mambapy   -> src/models/s4_models.py (WIP S4/Mamba)
+extras = ["geomloss", "mambapy"]
+
+[dependency-groups]
+dev = ["pytest"]
+
+# CUDA 12.1 PyTorch wheels. On compute nodes with a different driver/CUDA build,
+# change the index URL (e.g. cu118) or drop [tool.uv] and `uv pip install torch`.
+[tool.uv]
+default-groups = ["dev"]
+
+[[tool.uv.index]]
+name = "pytorch-cu121"
+url = "https://download.pytorch.org/whl/cu121"
+explicit = true
+
+[tool.uv.sources]
+torch = { index = "pytorch-cu121" }
+
+# The codebase imports everything as `from src.<...> import ...`, so the
+# top-level importable package is `src` itself. Discover it (and its
+# subpackages) from the repo root.
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["src*"]
+
+# Ship the bundled placeholder HDF5 used by the smoke tests.
+[tool.setuptools.package-data]
+"src.utils" = ["*.h5"]
+
+[tool.pytest.ini_options]
+# Put the repo root on sys.path so `import src...` works without an editable
+# install (the suite then passes straight from a fresh checkout).
+pythonpath = ["."]
+testpaths = ["tests"]
+addopts = "-q"

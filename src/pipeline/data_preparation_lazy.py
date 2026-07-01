@@ -84,6 +84,7 @@ class PviLazyDataset(PviConfiguredDataset):
 
         self.max_cache = max_cache
         self.cache = None
+        self.clear_cache_every_epoch = False
 
         self._alias = f"{self.name} (LazyLoader)"
 
@@ -208,7 +209,7 @@ class PviLazyDataset(PviConfiguredDataset):
         subgroups = {}
         for subject, mask in zip(all_subjects, all_mask_subgroups):
             if subject not in subgroups:
-                subgroups[subject] = mask
+                subgroups[subject] = list(mask)
             else:
                 subgroups[subject].extend(mask)
 
@@ -428,7 +429,10 @@ class PviLazyDataset(PviConfiguredDataset):
             print(f"{self._alias} (WARNING): Custom BatchSampler will be used. Proceed with caution!")
             time.sleep(0.5)
 
-            params['cluster_size'] = max(5, self.max_cache - 2)
+            if "cluster_size" not in kwargs:
+                # Locality window for lazy HDF5 loading — never tie to max_cache (that
+                # forces each batch to touch O(max_cache) source files and appears hung).
+                params["cluster_size"] = 16
 
             if shuffle:
                 print(f"{self._alias} (WARNING): 'shuffle' is ignored when using custom batch sampler!")
@@ -445,7 +449,7 @@ class PviLazyDataset(PviConfiguredDataset):
         if not self._loader_params:
             raise AttributeError("Cannot get DataLoaders! Loader params not set.")
 
-        if self._loader_params.get('stratified') == False:
+        if not self._loader_params.get('stratified', False):
             params = {k: v for k, v in self._loader_params.items()
                       if k not in ['stratified', 'cluster_size', 'persistent_handle']}
 

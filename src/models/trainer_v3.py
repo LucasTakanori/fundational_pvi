@@ -9,6 +9,7 @@ from src.utils.primitives import DefaultStringFormat as dfmt
 from src.pipeline.data_discovery import ProjectPathManager
 from src.pipeline._data_preparation import ensemble_distance
 from src.pipeline.data_preparation_eager import PviConfiguredDataset
+from src.pipeline.data_preparation_lazy import PviLazyDataset
 
 from src.models.base_model import BasePviLearner
 from src.models import perf_metrics
@@ -32,7 +33,10 @@ class BaseModelHandler(ABC):
 
     def to(self, device:torch.device|str=None, dtype: torch.dtype=None) -> 'BaseModelHandler':
         self.model = self.model.to(device=device, dtype=dtype)
-        self.dataset = self.dataset.to(device=device, dtype=dtype)
+        # Lazy loaders yield CPU tensors; train_epoch/evaluate_epoch move each batch.
+        # Calling dataset.to(cuda) breaks pin_memory in DataLoader.
+        if not isinstance(self.dataset, PviLazyDataset):
+            self.dataset = self.dataset.to(device=device, dtype=dtype)
 
         self.device = device
         self.dtype = dtype
@@ -140,6 +144,14 @@ class ModelTrainer(BaseModelHandler):
         else:
             raise ValueError("clip_grad_norm must be a float or int")
 
+        self.use_amp = False
+        self._scaler = None
+
+    def set_amp(self, enabled: bool = True) -> None:
+        cuda = self.device is not None and getattr(self.device, "type", str(self.device)) == "cuda"
+        self.use_amp = bool(enabled and cuda)
+        self._scaler = torch.cuda.amp.GradScaler(enabled=self.use_amp)
+
     def train_epoch(self) -> dict[str, float]:
         """
         NOTE:
@@ -161,23 +173,37 @@ class ModelTrainer(BaseModelHandler):
         num_samples = 0
 
         for batch in pbar:
-            batch = h5io.transfer(batch, device=self.device, dtype=self.dtype)
+            batch = h5io.transfer(batch,
+                                device=self.device,
+                                dtype=self.dtype,
+                                non_blocking=self.use_amp)
 
             self.model.train()
-            self.optimizer.zero_grad()
+            self.optimizer.zero_grad(set_to_none=True)
 
-            input_sequences, input_stats, batch_targets = self.model.process_batch(batch)
-            batch_predictions = self.model(input_sequences, input_stats)
+            with torch.autocast(device_type="cuda",
+                                enabled=self.use_amp,
+                                dtype=torch.float16):
+                input_sequences, input_stats, batch_targets = self.model.process_batch(batch)
+                batch_predictions = self.model(input_sequences, input_stats)
+                batch_loss = self.loss_func(batch_predictions, batch_targets)
 
-            batch_loss = self.loss_func(batch_predictions, batch_targets)
-            batch_loss.backward()
-
-            if self.clip_grad_norm is not None:
-                nn.utils.clip_grad_norm_(parameters=self.model.parameters(),
-                                         max_norm=self.clip_grad_norm,
-                                         norm_type=2.0)
-
-            self.optimizer.step()
+            if self._scaler is not None and self.use_amp:
+                self._scaler.scale(batch_loss).backward()
+                if self.clip_grad_norm is not None:
+                    self._scaler.unscale_(self.optimizer)
+                    nn.utils.clip_grad_norm_(parameters=self.model.parameters(),
+                                             max_norm=self.clip_grad_norm,
+                                             norm_type=2.0)
+                self._scaler.step(self.optimizer)
+                self._scaler.update()
+            else:
+                batch_loss.backward()
+                if self.clip_grad_norm is not None:
+                    nn.utils.clip_grad_norm_(parameters=self.model.parameters(),
+                                             max_norm=self.clip_grad_norm,
+                                             norm_type=2.0)
+                self.optimizer.step()
 
             pbar.set_postfix_str(s=f"loss={batch_loss:.2f}")
 

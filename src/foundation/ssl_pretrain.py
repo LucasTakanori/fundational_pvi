@@ -7,26 +7,35 @@ transfer into `PviFoundationModel`.
 Run from the repo root:
 
     python -m src.foundation.ssl_pretrain --input-mode signal --max-epochs 50
-
-Datasets are discovered under `$PVIPROJECT_ROOT/datasets/main` (see README).
 """
 
 import argparse
+import sys
 
 from src.packages import *  # noqa: F401,F403  (torch, optim, Path, ...)
+
+from tqdm import tqdm
 
 from src.utils.primitives import DEFAULT_TRAIN_DEVICE, DEFAULT_TRAIN_DTYPE
 from src.pipeline.data_discovery import ProjectPathManager
 
 from src.foundation.config import FoundationConfig
+from src.foundation.model_factory import build_ssl_model
 from src.foundation.ssl import PviSSLModel
 from src.foundation.pretrain import build_population_dataset
 
 
-def _to_device(batch: dict, device, dtype) -> dict:
+def _log(msg: str) -> None:
+    print(msg, flush=True)
+
+
+def _to_device(batch: dict, device, dtype, non_blocking: bool = False) -> dict:
     out = {}
     for k, v in batch.items():
-        out[k] = v.to(device=device, dtype=dtype) if torch.is_tensor(v) else v
+        if torch.is_tensor(v):
+            out[k] = v.to(device=device, dtype=dtype, non_blocking=non_blocking)
+        else:
+            out[k] = v
     return out
 
 
@@ -36,43 +45,68 @@ def main(cfg: FoundationConfig = None,
          device=None) -> PviSSLModel:
     cfg = cfg or FoundationConfig()
     device = device or DEFAULT_TRAIN_DEVICE
+    use_amp = cfg.use_amp and getattr(device, "type", str(device)) == "cuda"
+    scaler = torch.amp.GradScaler("cuda", enabled=use_amp)
+
+    _log(f"[ssl] device={device}  amp={use_amp}  batch_size={cfg.batch_size}  "
+         f"max_cache={cfg.max_cache}  stratified={cfg.stratified}")
 
     pm = ProjectPathManager(branch="main", target=logdir)
+    _log("[ssl] building cohort dataset...")
     ds = build_population_dataset(cfg, ds_root=ds_root)
-    loaders = ds.get_dataloaders()
+    _log(f"[ssl] train={len(ds.train_mask):,}  test={len(ds.test_mask):,}  "
+         f"cluster_size={getattr(cfg, 'cluster_size', 'n/a')}")
 
-    model = PviSSLModel(ds.shapes,
-                        num_features=cfg.num_features,
-                        num_hidden_layers=cfg.num_hidden_layers,
-                        mask_ratio=cfg.mask_ratio,
-                        horizon=cfg.horizon,
-                        lambda_mask=cfg.lambda_mask,
-                        lambda_forecast=cfg.lambda_forecast,
-                        diff=cfg.diff,
-                        use_stats=cfg.use_stats).to(device=device, dtype=DEFAULT_TRAIN_DTYPE)
+    model = build_ssl_model(ds.shapes, cfg).to(device=device, dtype=DEFAULT_TRAIN_DTYPE)
 
     optimizer = optim.AdamW(model.parameters(), lr=cfg.lr, weight_decay=cfg.weight_decay)
 
     model.train()
     for epoch in range(1, cfg.max_epochs + 1):
+        loaders = ds.get_dataloaders()
+        n_batches = len(loaders["train"])
+        _log(f"[ssl] epoch {epoch}/{cfg.max_epochs}  batches={n_batches}")
+
         running = {"total": 0.0, "mask": 0.0, "forecast": 0.0}
-        n = 0
-        for batch in loaders["train"]:
-            batch = _to_device(batch, device, DEFAULT_TRAIN_DTYPE)
-            losses = model.pretext_loss(batch)
-            optimizer.zero_grad()
-            losses["total"].backward()
-            optimizer.step()
+        pbar = tqdm(loaders["train"], desc=f"ssl e{epoch}", file=sys.stdout, mininterval=2.0)
+        for batch in pbar:
+            batch = _to_device(batch, device, DEFAULT_TRAIN_DTYPE, non_blocking=use_amp)
+            optimizer.zero_grad(set_to_none=True)
+            with torch.autocast(device_type="cuda", enabled=use_amp, dtype=torch.float16):
+                losses = model.pretext_loss(batch)
+            if use_amp:
+                scaler.scale(losses["total"]).backward()
+                scaler.step(optimizer)
+                scaler.update()
+            else:
+                losses["total"].backward()
+                optimizer.step()
             for k in running:
                 running[k] += float(losses[k])
-            n += 1
-        if n:
-            msg = "  ".join(f"{k}={running[k] / n:.4f}" for k in running)
-            print(f"[ssl] epoch {epoch:4d}/{cfg.max_epochs}  {msg}")
+            pbar.set_postfix(total=f"{float(losses['total']):.4f}")
+
+        if n_batches:
+            msg = "  ".join(f"{k}={running[k] / n_batches:.4f}" for k in running)
+            _log(f"[ssl] epoch {epoch:4d}/{cfg.max_epochs}  {msg}")
+
+        if getattr(ds, "clear_cache_every_epoch", False):
+            ds.cleanup(attrs="cache", placeholder=None)
+            gc.collect()
 
     core_path = pm.logdir / "foundation_core_U.pt"
+    meta_path = pm.logdir / "foundation_core_U_meta.json"
     torch.save(model.core_state_dict(), core_path)
-    print(f"[ssl] Saved SSL-pretrained core (U) -> {core_path}")
+    import json
+    meta = {
+        "arch": cfg.ssl_arch or cfg.arch,
+        "input_mode": cfg.input_mode,
+        "output_mode": cfg.output_mode,
+        "shapes": {k: list(v) for k, v in ds.shapes.items()},
+    }
+    with open(meta_path, "w") as f:
+        json.dump(meta, f, indent=2)
+    _log(f"[ssl] Saved SSL-pretrained core (U) -> {core_path}")
+    _log(f"[ssl] Saved core metadata -> {meta_path}")
     return model
 
 
@@ -80,30 +114,54 @@ def _parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--input-mode", default="signal")
     p.add_argument("--output-mode", default="waveform")  # unused by SSL; keeps dataset happy
+    p.add_argument("--arch", default="mae", help="SSL encoder arch: mlp|mae.")
+    p.add_argument("--ssl-arch", default=None, dest="ssl_arch",
+                   help="Override SSL arch (defaults to --arch).")
     p.add_argument("--mask-key", default="mask05")
-    p.add_argument("--num-features", type=int, default=200)
-    p.add_argument("--num-hidden-layers", type=int, default=4)
+    p.add_argument("--num-features", type=int, default=512)
+    p.add_argument("--num-hidden-layers", type=int, default=6)
     p.add_argument("--mask-ratio", type=float, default=0.5)
     p.add_argument("--horizon", type=int, default=10)
-    p.add_argument("--batch-size", type=int, default=32)
+    p.add_argument("--batch-size", type=int, default=256)
+    p.add_argument("--max-cache", type=int, default=150)
+    p.add_argument("--cluster-size", type=int, default=16)
+    p.add_argument("--num-workers", type=int, default=0)
     p.add_argument("--max-epochs", type=int, default=500)
+    p.add_argument("--no-amp", action="store_true")
+    p.add_argument("--clear-cache-each-epoch", action="store_true")
+    p.add_argument("--stratified", action="store_true",
+                   help="Use PviBatchSampler (default: plain shuffled DataLoader).")
     p.add_argument("--logdir", default="foundation-ssl-pretrain")
     p.add_argument("--ds-root", default=None)
+    p.add_argument("--cache-root", default=None)
+    p.add_argument("--cache-num-workers", type=int, default=None)
     return p.parse_args()
 
 
 if __name__ == "__main__":
     args = _parse_args()
+    cache_num_workers = args.cache_num_workers if args.cache_num_workers is not None else FoundationConfig.cache_num_workers
     cfg = FoundationConfig(input_mode=args.input_mode,
                            output_mode=args.output_mode,
                            mask_key=args.mask_key,
+                           arch=args.arch,
+                           ssl_arch=args.ssl_arch,
                            num_features=args.num_features,
                            num_hidden_layers=args.num_hidden_layers,
                            mask_ratio=args.mask_ratio,
                            horizon=args.horizon,
                            batch_size=args.batch_size,
+                           max_cache=args.max_cache,
+                           cluster_size=args.cluster_size,
+                           stratified=args.stratified,
+                           persistent_h5=False,
+                           num_workers=args.num_workers,
+                           cache_root=args.cache_root,
+                           cache_num_workers=cache_num_workers,
+                           use_amp=not args.no_amp,
+                           clear_cache_every_epoch=args.clear_cache_each_epoch,
                            max_epochs=args.max_epochs)
     try:
         main(cfg, logdir=args.logdir, ds_root=args.ds_root)
     except FileNotFoundError as e:
-        print(f"[ssl] {e}")
+        print(f"[ssl] {e}", flush=True)

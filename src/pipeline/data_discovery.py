@@ -97,10 +97,7 @@ class PviDatasetInventory:
                  ds_root: str | Path = None) -> None:
         self._alias = type(self).__name__
 
-        if ds_root is None:
-            self.ds_root = ProjectRoot().root / "datasets"
-        else:
-            self.ds_root = Path(ds_root)
+        self.ds_root = resolve_data_root(ds_root)
 
         # list of all possible sessions and subjects. Not necessarily what available in the target directory
         self._range_sessions = SessionName.keys()
