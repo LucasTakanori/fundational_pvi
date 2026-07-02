@@ -18,6 +18,8 @@ the numbered sections below (§1–§13) — this section is commands and gates,
 **Read §1.3 and §3.3 before running any experiment** — they define what a result actually
 means here and prevent the two mistakes already made once in this project's history
 (comparing across split protocols, §1.1; trusting a correlation metric alone, §3.3/§7.3).
+**§14 (revision 2026-07-02) and §15 (detailed forward runbook) supersede stale specifics
+below — start there for what to run next.**
 
 ### Phase 0 — Environment sanity `[VERIFY]`
 
@@ -1406,3 +1408,209 @@ sbatch src/launch_test.sh            # on cluster, off the login node
   carry.
 - Compute is 1 GPU / 10-day SLURM jobs, not the originally assumed 2×H100 — scope
   discipline (§8.2) is required to land the primary pillars within this budget.
+
+---
+
+## 14. Revision 2026-07-02 — decisions from review (read alongside §0)
+
+This revision folds in a review pass plus the user's explicit direction: *aim high, try
+many architectures, keep what works; 91 subjects is a hard ceiling but external-dataset
+pretraining + fine-tuning is available; no time constraint.* Concrete code landed in this
+revision is marked **[DONE]**; everything else is specified for the forward runbook (§15).
+
+### 14.1 Per-subject readouts during Core S pretraining — the paper-faithful fix **[DONE]**
+
+**The problem it fixes.** Until now, supervised pretraining pooled *every* subject through a
+single `SHARED_READOUT` (`pretrain.py`). One head fitting everyone's *absolute* BP forces
+the shared core to *encode* subject identity to compensate — the opposite of what §1.1/§3.3
+want (a subject-*invariant* core). Wang et al. instead train one readout **per subject**
+jointly on top of the shared core, so each subject's idiosyncratic scale/offset is absorbed
+by its own head and the core is pressured to carry only subject-shared structure.
+
+**What changed.**
+- `foundation_model.py`: `enable_per_subject_readouts(subject_ids=None)` creates one readout
+  per subject (keyed by the 1-based `subject_idx`), and `forward_readout` routes each sample
+  to its subject's head (`_forward_readout_multi`). Off by default → byte-for-byte the old
+  shared-readout behaviour, so existing runs/checkpoints/tests are unaffected. `process_batch`
+  now stashes `subject_idx` so routing needs no change to the trainer signature. Unseen
+  subjects fall back to `SHARED_READOUT`; readouts are discarded at transfer time (only the
+  core is exported), so over-allocating 1..NUM_SUBJECTS is harmless.
+- `config.py`: `per_subject_readout: bool = False`.
+- `pretrain.py`: `--per-subject-readout` flag; enables the mode **before** the optimizer is
+  built (so the readout params are actually optimized) and warns if paired with
+  `split_mode=disjoint`.
+- `launch_crt_pretrain.sh`: `PER_SUBJECT_READOUT` toggle.
+- `tests/test_per_subject_readout.py`: routing, shared-fallback, and gradient-isolation tests.
+
+**Load-bearing pairing.** Enable per-subject readouts **with `split_mode=within` (PW)**. Under
+`within`, the in-run test sequences come from subjects that have a trained readout, so the
+monitored metric is meaningful. Under `disjoint` (PD) the in-run test subjects are unseen and
+have no readout — that core is still valid but must be judged **via transfer**, not the in-run
+test number. Reproduce the §10.1 PD benchmark with the *old* mode (shared readout + disjoint).
+
+### 14.2 Architecture search, done rigorously (resolves the "test many architectures" bet)
+
+The earlier claim that architecture tuning can't move the population-disjoint ceiling was
+**over-stated** and is corrected here: the paper tested 5 families (≈2 inductive biases),
+single-task supervised, so it rules out *inflating the existing supervised CRT/CRS recipe*
+(§3.5) — not the broader design space. Testing more/SOTA architectures is a legitimate bet,
+especially with unlimited compute. Two guardrails keep it from violating §8.2:
+
+1. **Prioritise invariance-targeting methods over generic capability.** Split candidates by
+   what they buy: (a) *statistical efficiency / inductive bias* — Mamba/SSM, RoPE, TimesNet
+   periodicity, HiMAE multi-resolution — mostly raise the *in-distribution* ceiling and
+   calibration efficiency; (b) *subject-invariance / nuisance removal* — domain-adversarial
+   GRL (§3.7 Tier 1, already coded), whitened/discretised SSL (§3.6), FiLM per-subject
+   conditioning, input-normalisation — these are the ones that can actually move
+   *cross-subject generalization* on fixed data. Weight the search toward (b).
+2. **Label-gap-stratified decision rule (promote/discard).** For every candidate, stratify
+   held-out subjects by label gap (§3.3/§10.1 distribution-shift diagnostic; `w1_label` from
+   `ModelEvaluator.get_stats` / `ensemble_distance` is the existing hook). If a candidate
+   reduces error on **high-label-gap** (most OOD) subjects → genuine generalization, promote.
+   If it only helps **low-gap** subjects → efficiency, record and move on. Pre-register this
+   rule per candidate so "try everything" stays disciplined.
+
+### 14.3 External-dataset pretraining — elevated to a co-primary breadth lever
+
+Because 91 subjects is a hard ceiling and the source authors blame *data breadth* (§3.5), the
+single biggest lever is pretraining the core on **large external biosignal corpora**, then
+fine-tuning on the ring. This moves from §3.8's "cheap fine-tuning pass" to a **co-primary
+strategy**, run as a controlled ablation (arms: ours-only / external+adapter / external+ours).
+Honest risk: modality gap (external BP data is mostly PPG/ECG vs. 32-channel bioimpedance) →
+budget for an input adapter and report adapter-only vs. full-transfer. See §15 Track 5.
+
+### 14.4 EIT reconstruction — the solver port exists; what's still needed **[helper DONE]**
+
+The MATLAB EIT pipeline has been ported to Python (`pvi_mesh2d`/`pvi_configs`/`pvi_forward`/
+`pvi_inverse`): CEM forward solver, reciprocity Jacobian, one-step Gauss–Newton inverse — the
+real physics §3.4 wanted. `compute_jacobian()` yields `J` (measurements × elements); combined
+with the `m2i` element→pixel map it becomes the `weight` for
+`EITForwardOperator` (`src/models/eit_recon.py`). **Still needed** (secondary track, gated):
+(1) the ring mesh `.h5` (uploads so far are tank/resistor/pipette *phantoms*, and `make_ring`
+is a stub), (2) the `c2f`/`m2i` mapping `.h5`, (3) confirm the ring electrode count (32?),
+(4) confirm the Python port matches the MATLAB output. New helper
+`src/scripts/inspect_mesh_files.py` fingerprints a directory of `.h5` files to locate the ring
+mesh + mapping files without guessing. Keep this secondary: §10.1 shows image ≈ BioZ on
+accuracy, so its justification is generalization/interpretability, not accuracy.
+
+### 14.5 Corrections to earlier statements (for honesty in the write-up)
+
+- The "~9 mmHg / r²≈0.3" figure is the *pooled-disjoint direct-readout* ceiling. It does **not**
+  cap the project's actual paradigm (frozen core + small per-subject readout + calibration
+  budget); the relevant target for Exp B is "how few calibration points to approach ~5 mmHg"
+  (cf. §10.1 SS03 per-subject linear = 5.0 mmHg).
+- §7.3 scale bug: the production path (mae+impedance+transfer) passed the Phase-2 scale gate
+  (preds 79–119 mmHg, transfer AMAE 5.5). The historical AMAE≈98 (scaffold Core U, job 424512)
+  stays flagged until Exp B @ 64-min budget is re-run on a production Core U (§15 Track 3).
+
+---
+
+## 15. Detailed forward runbook (what to run, how, and implementation instructions)
+
+Ordered by priority. Tracks 1–3 are the primary spine; 4–6 are the "aim high" breadth. Each
+step is tagged as in §0 (`[FIX]` code, `[BUILD]` artifact, `[TRAIN]`, `[EXPERIMENT]`,
+`[VERIFY]`). Environment/prereqs as in §0 Phase 0 and §11.1. All commands run from the repo
+root inside the venv with `env/cluster.env` sourced.
+
+### Track 1 — Rebuild the transferable Core S with per-subject readouts (primary) **[ready]**
+
+Prereq: the `main_within` (PW) Parquet cache exists (§0 Phase 1 step 6; already built per the
+worklog). This is the core that Exp A/B/C/G should use.
+
+```bash
+# CRT, per-subject readouts, within split (edit the top block or use the defaults):
+#   PER_SUBJECT_READOUT=1 ; SPLIT_MODE=within ; LOGDIR=foundation-pretrain-crt-pw-psr
+sbatch src/launch_crt_pretrain.sh
+# samba co-primary: same script with --arch samba (or add a launch_samba_pretrain.sh)
+```
+
+`[VERIFY]` after it finishes: `[pretrain] per-subject readouts enabled` appears in the log; a
+`foundation_core.pt` + `foundation_core_meta.json` are written; the in-run test `bp_accuracy`
+is a real number (within split → test subjects have readouts). Then transfer to held-out
+subjects (Track 3). **Do not** read `branch=holdout` here — that is final-report-only (§7.1).
+
+### Track 2 — Reproduce the §10.1 PD benchmark as a calibration reference **[ready]**
+
+```bash
+# shared readout (old mode) + disjoint, so the in-run test == the paper's PD protocol:
+#   PER_SUBJECT_READOUT=0 ; SPLIT_MODE=disjoint ; CACHE_ROOT=..._main_disjoint ; LOGDIR=...-crt-pd
+sbatch src/launch_crt_pretrain.sh
+```
+
+Expect ~AMAE 9 mmHg / r²≈0.3 (§10.1 pd15). If wildly off, something in the production config is
+broken — fix before trusting Track 1 (§0 Phase 4 step 6).
+
+### Track 3 — Exp A/B budget curves, with the decomposition + matched-capacity control (primary)
+
+1. `[FIX]` Extend `src/foundation/budget_exp.py` to accept the three calibration mechanisms
+   (§3.2: frozen-linear / MLP-or-partial-finetune / per-subject affine) and the
+   matched-capacity control (§8.1). CLI: `--calibration {linear,mlp,finetune,affine}`,
+   `--matched-capacity`. The affine mechanism fits a 2-param scale+offset per subject on a few
+   calibration points on top of the frozen core+readout (§3.3).
+2. `[FIX]` Wire the shape/bias/label-gap decomposition (§3.3, §6) into the per-run record:
+   per-subject signed bias `mean(pred−true)`, post-affine-corrected AMAE, and the subject's
+   label gap (reuse `ensemble_distance`/`w1_label`). Emit these next to `cc_abs`/AMAE so
+   `src/analysis/budget_curves.py` can aggregate them.
+3. `[EXPERIMENT]` Run the matrix on the Track-1 core, ≥10–20 held-out subjects × ≥3 seeds:
+   ```bash
+   python -m src.foundation.budget_exp --subject <subj> \
+     --core-s artifacts/foundation-pretrain-crt-pw-psr/main/foundation_core.pt \
+     --arch crt --budgets-min 4,8,16,32,64 --seeds 0,1,2 \
+     --calibration affine --matched-capacity
+   ```
+   Parallelise across SLURM array jobs (each run is small). Aggregate with
+   `budget_curves.py` (mean±sem, paired across the same subjects).
+4. `[EXPERIMENT]` **Close the §7.3 flag**: re-run the 64-min budget point on a production
+   Core U; expect AMAE ≪ 98. Until then keep the §10.5 row flagged.
+
+### Track 4 — Architecture search, invariance-first, with the label-gap rule (aim high)
+
+Order by §14.2. Cheapest first (already coded): flip on the Tier-1 items during a Track-1 run.
+
+```bash
+# RoPE positional encoding in CRT:
+sbatch src/launch_crt_pretrain.sh        # add --crt-pe-type rope (thread through the script)
+# Domain-adversarial subject invariance (stackable with per-subject readouts):
+#   add --subject-adversary  (GRL warm-up handled by dann_lambda_schedule)
+```
+
+For each *new* architecture (TimesNet-periodicity frontend, pure-Mamba, HiMAE multi-resolution
+SSL, NormWear-style pure-attention): `[FIX]` register the tag in
+`src/foundation/model_factory.py` / `src/models/_model_mapper.py` implementing
+`forward_core`/`forward_readout` on `BasePviLearner` (so it is transferable unchanged), add a
+build smoke test to `tests/test_model_factory.py`, then `[TRAIN]` on the within cache and
+`[EXPERIMENT]` judge by **label-gap-stratified** held-out error (§14.2 rule) — promote only if
+it helps high-label-gap subjects. Record negatives too (§8.2).
+
+### Track 5 — External-dataset pretraining → fine-tune on the ring (breadth lever, co-primary)
+
+1. `[FIX]` Build an input adapter: a small trainable frontend mapping the external modality
+   (PPG/ECG single/low-channel) into the core's expected input, freezing the pretrained
+   backbone (mirror the §3.8 checkpoint-fine-tune recipe: PITN / HuBERT-ECG / NormWear).
+2. `[BUILD]`+`[TRAIN]` Pretrain (or load) the core on the external corpus.
+3. `[EXPERIMENT]` Fine-tune + evaluate on our PW/PD/holdout with three arms:
+   (i) ours-only, (ii) external+adapter (adapter/readout only), (iii) external+ours.
+   Judge by held-out-subject AMAE and the §14.2 label-gap rule. Arm (ii)/(iii) beating (i) on
+   held-out subjects is a headline result. Report the modality-gap caveat honestly.
+
+### Track 6 — EIT reconstruction (secondary, gated on geometry)
+
+1. `[VERIFY]` Locate the ring mesh + maps:
+   ```bash
+   python -m src.scripts.inspect_mesh_files "$PVI_DATA_ROOT" --recursive --ring-elecs 32
+   ```
+   Hand over the file(s) tagged `<-- likely RING` and the `MAPPING` file.
+2. `[FIX]` Build the physics operator: `weight = J @ (element→pixel map from m2i)`, shape
+   `(num_measurements, 40*40)`; pass it to `EITForwardOperator(..., weight=weight,
+   learnable=False)` (`src/models/eit_recon.py`). Validate the port against the MATLAB tank CSVs
+   before trusting it.
+3. `[EXPERIMENT]` Compare raw channels vs. Newton image vs. learned reconstruction on
+   downstream transfer/OOD (Exp F). Justify on generalization/interpretability, not accuracy.
+
+### Sequencing summary
+
+Track 1 + Track 2 now (produce the two cores). Track 3 next (the paper's spine: Exp A/B with
+decomposition + matched-capacity). Track 4 + Track 5 in parallel as the breadth bets (unlimited
+compute), judged by the label-gap rule. Track 6 only once the ring geometry arrives. Exp C
+(OOD across maneuvers, §0 Phase 6) and Exp G (Core U vs S) follow Track 3 using the same
+held-out cohort and paired stats.

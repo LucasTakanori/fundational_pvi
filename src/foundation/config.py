@@ -29,6 +29,9 @@ class FoundationConfig:
     num_features: int = 512
     num_hidden_layers: int = 6
     readout_hidden: int = 0
+    # Per-subject readouts during supervised Core S pretraining (paper-faithful; §14).
+    # Off by default for backward compatibility; pair with split_mode='within'.
+    per_subject_readout: bool = False
     # crt (PviCNNTransformer)
     crt_projection_dim: int = 100
     crt_transformer_dim: int = 64

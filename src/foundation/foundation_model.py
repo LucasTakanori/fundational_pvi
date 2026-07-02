@@ -101,6 +101,14 @@ class PviFoundationModel(BasePviLearner):
             self.add_readout(sid)
         self._active = SHARED_READOUT
 
+        # Per-subject readout routing (PLAN.md §14 - paper-faithful foundation-cohort
+        # training). Off by default: behaves exactly like the single shared readout, so
+        # every existing call-site / checkpoint is unaffected. When enabled, each sample
+        # is routed to its own subject's readout (keyed by 1-based subject_idx), which
+        # pressures the shared core to encode only subject-invariant structure (§3.3).
+        self._multi_readout = False
+        self._pending_subject_idx: torch.Tensor | None = None
+
     def _data_shapes_dict(self) -> dict:
         stats_shape = (int(self.stats_size),) if self.stats_size else (0,)
         return {
@@ -188,6 +196,38 @@ class PviFoundationModel(BasePviLearner):
         self.readout = self.readouts[name]
         return self
 
+    def enable_per_subject_readouts(self,
+                                    subject_ids: "list[int] | None" = None,
+                                    ) -> "PviFoundationModel":
+        """Give every subject its own readout and route each sample to its head.
+
+        This is the paper-faithful foundation-cohort training mode (Wang et al.: one
+        shared core, one readout *per subject*, trained jointly). The shared core sees
+        every subject, but each subject's idiosyncratic scale/offset is absorbed by its
+        *own* readout, so the core is pressured to encode only subject-shared structure
+        rather than memorising per-subject calibration (PLAN.md §14, §3.3). Contrast the
+        default single ``SHARED_READOUT``, which forces the core to fit everyone's
+        absolute BP with one head and thus to *encode* subject identity.
+
+        Readouts are keyed by the 1-based subject index found in ``batch['subject_idx']``
+        (``src/utils/primitives.subject_name_to_idx``). With ``subject_ids=None`` a readout
+        is created for every possible subject (1..NUM_SUBJECTS); unused ones never receive
+        gradients and are discarded at transfer time (only the core is exported), so the
+        over-allocation is harmless.
+
+        Pair with ``split_mode='within'`` so the in-run test set contains sequences from
+        subjects that have a trained readout. Under ``'disjoint'`` the in-run test subjects
+        are unseen and have no readout, so that metric is not meaningful - evaluate such a
+        core via transfer instead.
+        """
+        from src.utils.primitives import NUM_SUBJECTS
+        if subject_ids is None:
+            subject_ids = list(range(1, NUM_SUBJECTS + 1))
+        for sid in subject_ids:
+            self.add_readout(str(int(sid)))
+        self._multi_readout = True
+        return self
+
     @property
     def active(self) -> str:
         return self._active
@@ -195,6 +235,15 @@ class PviFoundationModel(BasePviLearner):
     @property
     def subjects(self) -> list[str]:
         return [k for k in self.readouts if k != SHARED_READOUT]
+
+    def process_batch(self, batch):
+        # Capture per-sample subject identity so forward_readout can route to the
+        # matching per-subject head when multi-readout mode is on. Behaviour of the
+        # base process_batch (the returned (seqs, stats, targets) tuple) is unchanged;
+        # this only stashes an extra tensor and is a no-op unless multi-readout is on.
+        out = super().process_batch(batch)
+        self._pending_subject_idx = batch.get("subject_idx") if self._multi_readout else None
+        return out
 
     # ---------------------------------------------------------- core/readout
     def forward_core(self,
@@ -211,7 +260,31 @@ class PviFoundationModel(BasePviLearner):
                         input_stats: torch.Tensor) -> torch.Tensor:
         if self._stats_in_readout and input_stats.numel():
             features = torch.hstack([features, input_stats.flatten(start_dim=1)])
+        if self._multi_readout and self._pending_subject_idx is not None:
+            return self._forward_readout_multi(features, self._pending_subject_idx)
         return self.readouts[self._active](features)
+
+    def _forward_readout_multi(self,
+                               features: torch.Tensor,
+                               subject_idx: torch.Tensor) -> torch.Tensor:
+        """Route each row of ``features`` through its own subject's readout.
+
+        ``subject_idx`` is the per-sample 1-based index from ``batch['subject_idx']``.
+        Samples whose subject has no readout (e.g. an unseen subject under a disjoint
+        split) fall back to ``SHARED_READOUT`` rather than crashing. If the index length
+        does not match the batch (a bare forward with no matching process_batch), fall
+        back to the active readout instead of mis-routing.
+        """
+        subject_idx = subject_idx.view(-1).to(features.device)
+        if subject_idx.numel() != features.shape[0]:
+            return self.readouts[self._active](features)
+        out = features.new_zeros((features.shape[0], self.output_size))
+        for s in torch.unique(subject_idx).tolist():
+            key = str(int(s))
+            readout = self.readouts[key] if key in self.readouts else self.readouts[SHARED_READOUT]
+            mask = subject_idx == s
+            out[mask] = readout(features[mask])
+        return out
 
     def forward_for(self,
                     input_sequences: dict[str, torch.Tensor],

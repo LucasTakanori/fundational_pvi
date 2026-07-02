@@ -15,6 +15,10 @@
 CACHE_ROOT="/mmfs1/scratch/lsanc68/pvi_cache/v1_impedance_main_within"
 SPLIT_MODE="within"              # disjoint = PD  |  within = PW
 LOGDIR="foundation-pretrain-crt-pw"
+# Paper-faithful foundation-cohort training: one readout per subject (PLAN.md §14).
+# Use "1" with SPLIT_MODE=within to build the transferable core (the primary path).
+# Use "0" with SPLIT_MODE=disjoint to reproduce the §10.1 PD benchmark (shared readout).
+PER_SUBJECT_READOUT="1"
 # --------------------------------
 
 set -euo pipefail
@@ -41,7 +45,12 @@ if ! python -u -m src.scripts.check_cache \
   exit 1
 fi
 
-echo "CACHE_ROOT=${CACHE_ROOT}  split_mode=${SPLIT_MODE}  logdir=${LOGDIR}"
+READOUT_FLAG=""
+if [[ "${PER_SUBJECT_READOUT}" == "1" ]]; then
+  READOUT_FLAG="--per-subject-readout"
+fi
+
+echo "CACHE_ROOT=${CACHE_ROOT}  split_mode=${SPLIT_MODE}  logdir=${LOGDIR}  per_subject_readout=${PER_SUBJECT_READOUT}"
 
 python -u -m src.foundation.pretrain \
   --input-mode impedance \
@@ -54,6 +63,7 @@ python -u -m src.foundation.pretrain \
   --split-mode "${SPLIT_MODE}" \
   --cache-num-workers 8 \
   --branch main \
+  ${READOUT_FLAG} \
   --logdir "${LOGDIR}"
 
 deactivate

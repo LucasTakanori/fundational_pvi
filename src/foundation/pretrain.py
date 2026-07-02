@@ -126,9 +126,20 @@ def main(cfg: FoundationConfig = None,
     pm = ProjectPathManager(branch=cfg.branch, target=logdir)
     ds = build_population_dataset(cfg, ds_root=ds_root)
 
-    # Pooled pretraining uses the single shared readout.
+    # Pooled pretraining uses the single shared readout, unless per-subject readouts
+    # are enabled (paper-faithful foundation-cohort training; PLAN.md §14).
     model = build_foundation_model(ds.shapes, cfg)
     model.set_active(SHARED_READOUT)
+
+    if getattr(cfg, "per_subject_readout", False):
+        model.enable_per_subject_readouts()   # must run BEFORE the optimizer is built
+        print("[pretrain] per-subject readouts enabled "
+              "(paper-faithful foundation-cohort training, PLAN.md §14)", flush=True)
+        if str(getattr(cfg, "split_mode", "disjoint")).lower() in ("disjoint", "inter", "subjects"):
+            print("[pretrain] WARNING: per-subject readouts + split_mode=disjoint -> the "
+                  "in-run test subjects are unseen and have no readout, so the in-run test "
+                  "metric is NOT meaningful. Use --split-mode within for monitoring, or judge "
+                  "this core only via transfer (PLAN.md §14).", flush=True)
 
     if cfg.subject_adversary:
         attach_subject_adversary(model)
@@ -214,6 +225,10 @@ def _parse_args() -> argparse.Namespace:
                    help="DataLoader workers when training from cache (default: config).")
     p.add_argument("--crt-pe-type", default=None, dest="crt_pe_type",
                    help="CRT positional encoding: rrpe|rope|sinusoidal|learnable|none.")
+    p.add_argument("--per-subject-readout", action="store_true",
+                   help="Route each sample to its own subject readout during pretraining "
+                        "(paper-faithful foundation-cohort training; pair with "
+                        "--split-mode within). See PLAN.md §14.")
     p.add_argument("--subject-adversary", action="store_true",
                    help="Enable gradient-reversal subject-adversary auxiliary head.")
     p.add_argument("--subject-adversary-weight", type=float, default=1.0)
@@ -243,6 +258,7 @@ if __name__ == "__main__":
                            clear_cache_every_epoch=args.clear_cache_each_epoch,
                            min_epochs=args.min_epochs,
                            max_epochs=args.max_epochs,
+                           per_subject_readout=args.per_subject_readout,
                            subject_adversary=args.subject_adversary,
                            subject_adversary_weight=args.subject_adversary_weight,
                            dann_gamma=args.dann_gamma)
